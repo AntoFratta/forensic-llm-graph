@@ -1,0 +1,7 @@
+{
+  "input_path": "data/processed/documents.json",
+  "output_path": "outputs/baseline.json",
+  "use_spacy": true,
+  "spacy_model": "it_core_news_lg",
+  "spacy_model_version": "3.8.0"
+}

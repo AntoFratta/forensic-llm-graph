@@ -1,1 +1,20 @@
 /research/
+
+# Local data and experiment results
+/data/raw/
+/data/processed/
+/outputs/
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Credentials and local model files
+.env
+.env.*
+/models/
+.cache/
