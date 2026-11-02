@@ -207,7 +207,9 @@ def main() -> None:
         }
         output_dir.mkdir(parents=True, exist_ok=True)
         for path, content in zip(output_paths, [documents, annotations, report]):
-            path.write_text(json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8")
+            path.write_text(
+                json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n",
+            )
         print(f"Saved {len(documents)} complete documents to {output_dir}")
     except (OSError, ValueError, PdfReadError) as exc:
         parser.exit(1, f"Error: {exc}\n")

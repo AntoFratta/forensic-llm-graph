@@ -76,7 +76,20 @@ _ADDRESS = re.compile(
     r"\s*,?\s*(?:n\.\s*)?\d+(?:\s*/\s*[A-Z])?"
     r"(?:\s*,?\s*C\.?A\.?P\.?\s*\d{5})?\b"
 )
-_COMPANY_SUFFIX = _pattern(r"\b(?:s\s*\.?\s*r\s*\.?\s*l\s*\.?\s*s?|s\s*\.?\s*p\s*\.?\s*a|s\s*\.?\s*n\s*\.?\s*c)\b|società|societa")
+_COMPANY_SUFFIX = _pattern(
+    r"\b(?:s\s*\.?\s*r\s*\.?\s*l\s*\.?\s*s?|"
+    r"s\s*\.?\s*p\s*\.?\s*a|s\s*\.?\s*n\s*\.?\s*c)"
+    r"\b\.?[\s\"'”»]*$"
+)
+_ADMINISTRATIVE_PLACE = _pattern(
+    r"^(?:comune|provincia|regione|città(?:\s+metropolitana)?)"
+    r"\s+(?:di\s+|del\s+|della\s+|dell['’]\s*)"
+)
+_GENERIC_PLACE = _pattern(r"^(?:comune|provincia|regione|città|località|paese)$")
+_LEGAL_REFERENCE = _pattern(
+    r"^(?:d\s*\.\s*lgs\.?|d\s*\.\s*p\s*\.\s*r\.?|"
+    r"d\s*\.\s*l\.?|art(?:t)?\.?|legge|decreto)$"
+)
 
 
 def load_nlp(model_name: str):
@@ -217,14 +230,16 @@ def _extract_times(text: str, entities: list) -> list:
 def _extract_nlp(text: str, nlp) -> list:
     """Map spaCy entity spans to project labels without changing their offsets.
 
-    ORG includes institutions as well as companies. Organization spans without
-    company wording receive a tentative COMPANY label and an explicit review flag.
+    ORG includes institutions as well as companies. Spans without a recognized
+    legal suffix retain a tentative COMPANY label and an explicit review flag.
+    POS tags supply additional review signals, not automatic rejection rules.
     """
     doc = nlp(text)
     if doc.text != text:
         raise ValueError("The NLP component must preserve the original text.")
     labels = {"PER": "PERSON", "PERSON": "PERSON", "LOC": "LOCATION",
               "GPE": "LOCATION", "FAC": "LOCATION"}
+    has_pos = doc.has_annotation("POS")
     result = []
     for span in doc.ents:
         label = labels.get(span.label_)
@@ -233,29 +248,61 @@ def _extract_nlp(text: str, nlp) -> list:
             label = "COMPANY"
             if not _COMPANY_SUFFIX.search(span.text):
                 reasons = ("organization_not_necessarily_company",)
-        if label:
-            result.append(_entity(text, span.start_char, span.end_char, label, "spacy:ner", reasons))
+        if not label:
+            continue
+        candidate = _entity(text, span.start_char, span.end_char, label, "spacy:ner", reasons)
+        if label in {"PERSON", "LOCATION"}:
+            if has_pos and not any(token.pos_ == "PROPN" for token in span):
+                _flag(candidate, "name_without_proper_noun")
+            if _LEGAL_REFERENCE.fullmatch(span.text.strip()):
+                _flag(candidate, "legal_reference_as_name")
+            if re.search(r"\s+[MF](?:\s+[MF])?$", span.text):
+                _flag(candidate, "possible_form_fields_in_name")
+        if label == "LOCATION":
+            prefix = _ADMINISTRATIVE_PLACE.match(span.text)
+            if prefix and prefix.end() < len(span.text):
+                candidate["start"] += prefix.end()
+                candidate["text"] = text[candidate["start"]:candidate["end"]]
+                _flag(candidate, "administrative_place_boundary")
+            if _GENERIC_PLACE.fullmatch(candidate["text"].strip()):
+                _flag(candidate, "generic_place_term")
+        result.append(candidate)
     return result
 
 
 def _merge_addresses(text: str, result: list) -> list:
     """Extend address candidates with adjacent city names and remove inner places.
 
-    Only short gaps containing spaces or commas are accepted. This heuristic
-    updates address dictionaries in place; other overlapping labels are retained.
+    Only short gaps containing spaces or commas are accepted. Generic or suspect
+    place candidates cannot extend an address. Contained NLP names are recorded
+    as absorbed evidence, following the agreed flat address convention. Partial
+    overlaps remain separate candidates for review.
     """
     addresses = [e for e in result if e["source"] == "rule:street_address"]
+    blocked_reasons = {
+        "generic_place_term", "name_without_proper_noun",
+        "legal_reference_as_name", "possible_form_fields_in_name",
+    }
     for address in addresses:
         for place in result:
             if place["source"] == "spacy:ner" and place["label"] == "LOCATION":
+                if blocked_reasons.intersection(place["review_reasons"]):
+                    continue
                 gap = text[place["end"]:address["start"]]
                 if place["end"] <= address["start"] and len(gap) <= 4 and not gap.strip(" ,\t"):
                     address["start"] = place["start"]
                     address["text"] = text[address["start"]:address["end"]]
-    return [e for e in result if not (
-        e["source"] == "spacy:ner" and e["label"] == "LOCATION"
-        and any(a["start"] <= e["start"] and e["end"] <= a["end"] for a in addresses)
-    )]
+    kept = []
+    for entity in result:
+        container = None
+        if entity["source"] == "spacy:ner" and entity["label"] in {"LOCATION", "PERSON", "COMPANY"}:
+            container = next((a for a in addresses
+                              if a["start"] <= entity["start"] and entity["end"] <= a["end"]), None)
+        if container is not None:
+            container.setdefault("absorbed_entities", []).append(dict(entity))
+        else:
+            kept.append(entity)
+    return kept
 
 
 def _finish_entities(result: list) -> list:

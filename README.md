@@ -75,7 +75,13 @@ python scripts/run_pipeline.py --config configs/baseline.json --rules-only
 ```
 
 Use `--overwrite` only when intentionally replacing previous results. Otherwise
-choose a new output path in the configuration.
+use `--output` to keep each run separately, without editing the configuration:
+
+```bash
+python scripts/run_pipeline.py --output outputs/02_address_review_spacy_lg.json
+```
+
+The effective output path is recorded in the run metadata.
 
 ## Google Colab
 
@@ -114,12 +120,22 @@ Labels are `PERSON`, `COMPANY`, `ROLE`, `LOCATION`, `EMAIL`, `PHONE`, `TAX_CODE`
 recognized. Original dates are retained without interpreting day/month order.
 
 Review flags are heuristic signals, not confidence scores. Unflagged candidates
-can still be wrong. An `ORG` prediction without clear company wording is retained
-as a tentative `COMPANY` candidate with a review flag. Overlapping candidates are
-retained and flagged, except for locations merged into an address. Digit-count
+can still be wrong. Names with no proper-noun POS tag, generic place terms,
+legislative abbreviations and possible form fields receive additional review
+flags. POS signals are used only when the NLP pipeline provides those tags.
+An `ORG` prediction without a recognized legal suffix is retained
+as a tentative `COMPANY` candidate with a review flag. A word such as `società`
+alone is not sufficient to remove that flag. Administrative prefixes such as
+`Comune di` are excluded from geographic spans and the adjustment is flagged.
+Generic place words cannot be added as city names when merging addresses.
+NLP names fully contained in an address are stored in its `absorbed_entities`
+field rather than counted as separate mentions. Other overlaps are retained and
+flagged. Digit-count
 checks do not validate checksums or establish that an account exists.
 
 The run records the input hash, code revision, uncommitted-change status, model
 and library versions, mode, candidate counts and elapsed times. These are
 development outputs, not final LLM decisions or precision/recall/F1 scores.
 Timing covers the full selected spaCy pipeline, not only its NER component.
+Generated JSON files use LF line endings on both Windows and Colab to avoid
+platform-dependent input hashes caused by serialization alone.

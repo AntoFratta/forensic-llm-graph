@@ -86,6 +86,7 @@ def main() -> None:
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/baseline.json")
+    parser.add_argument("--output", help="Use a different output path for this run.")
     parser.add_argument("--rules-only", action="store_true", help="Run without the spaCy model.")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output file.")
     args = parser.parse_args()
@@ -100,6 +101,8 @@ def main() -> None:
                 raise ValueError(f"Configuration requires a non-empty string: {key}")
         if not isinstance(config.get("use_spacy"), bool):
             raise ValueError("use_spacy must be true or false.")
+        if args.output is not None:
+            config["output_path"] = args.output
 
         input_path = project_path(config["input_path"])
         output_path = project_path(config["output_path"])
@@ -141,6 +144,7 @@ def main() -> None:
             "config": config,
             "rules_only_override": args.rules_only,
             "input_path": str(input_path),
+            "output_path": str(output_path),
             "input_sha256": input_sha256,
             "python_version": platform.python_version(),
             "platform": platform.platform(),
@@ -158,7 +162,7 @@ def main() -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
             json.dumps({"run": run, "documents": results}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
+            encoding="utf-8", newline="\n",
         )
         print(f"Saved {run['candidate_count']} candidates to {output_path}")
     except (OSError, ValueError, RuntimeError) as exc:
