@@ -78,6 +78,23 @@ def git_info() -> dict:
         return {"commit": None, "uncommitted_changes": None}
 
 
+def summarize_sources(documents: list) -> dict:
+    """Count candidates by collection, keeping synthetic diagnostics separate."""
+    summaries = {}
+    for document in documents:
+        source = document.get("source", "unknown")
+        summary = summaries.setdefault(source, {
+            "documents": 0, "candidates": 0, "flagged_candidates": 0, "labels": {},
+        })
+        summary["documents"] += 1
+        for entity in document["entities"]:
+            summary["candidates"] += 1
+            summary["flagged_candidates"] += int(entity["needs_review"])
+            label = entity["label"]
+            summary["labels"][label] = summary["labels"].get(label, 0) + 1
+    return summaries
+
+
 def main() -> None:
     """Validate settings, load the model once, extract candidates and save results.
 
@@ -118,7 +135,7 @@ def main() -> None:
         nlp = None
         started = time.perf_counter()
         if use_spacy:
-            print(f"Loading {config['spacy_model']}...")
+            print(f"Loading {config['spacy_model']}...", flush=True)
             nlp = load_nlp(config["spacy_model"])
             if nlp.meta["version"] != config["spacy_model_version"]:
                 raise ValueError("Installed model version differs from the configuration.")
@@ -129,12 +146,15 @@ def main() -> None:
         for number, document in enumerate(documents, start=1):
             result = {"id": document["id"], "text": document["text"]}
             # Copy provenance only; any input annotations are excluded.
-            for key in ("document", "page", "pages", "source", "start", "end", "source_file", "source_sha256"):
+            for key in ("document", "page", "pages", "source", "start", "end", "source_file", "source_sha256",
+                        "article_id", "url", "title", "crime_category", "publication_date", "event_date",
+                        "synthetic", "language", "template_id", "source_revision", "source_url", "source_line"):
                 if key in document:
                     result[key] = document[key]
             result["entities"] = extract_entities(document["text"], nlp=nlp)
             results.append(result)
-            print(f"Processed {number}/{len(documents)}: {document['id']}")
+            if number == 1 or number % 100 == 0 or number == len(documents):
+                print(f"Processed {number}/{len(documents)}: {document['id']}", flush=True)
         extraction_seconds = time.perf_counter() - started
 
         run = {
@@ -158,6 +178,7 @@ def main() -> None:
             "document_count": len(results),
             "candidate_count": sum(len(r["entities"]) for r in results),
             "flagged_candidate_count": sum(e["needs_review"] for r in results for e in r["entities"]),
+            "by_source": summarize_sources(results),
         }
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(
