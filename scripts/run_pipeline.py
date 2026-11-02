@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import hashlib
 from importlib.metadata import version
 import json
+from itertools import repeat
 from pathlib import Path
 import platform
 import subprocess
@@ -118,6 +119,10 @@ def main() -> None:
                 raise ValueError(f"Configuration requires a non-empty string: {key}")
         if not isinstance(config.get("use_spacy"), bool):
             raise ValueError("use_spacy must be true or false.")
+        batch_size = config.get("spacy_batch_size", 8)
+        if type(batch_size) is not int or batch_size < 1:
+            raise ValueError("spacy_batch_size must be a positive integer.")
+        config["spacy_batch_size"] = batch_size
         if args.output is not None:
             config["output_path"] = args.output
 
@@ -143,7 +148,14 @@ def main() -> None:
 
         results = []
         started = time.perf_counter()
-        for number, document in enumerate(documents, start=1):
+        # Consume Docs as they are produced instead of retaining the entire NLP corpus.
+        parsed_documents = (
+            nlp.pipe((document["text"] for document in documents), batch_size=batch_size)
+            if use_spacy else repeat(None, len(documents))
+        )
+        if use_spacy:
+            print(f"Processing with spaCy batches of {batch_size}...", flush=True)
+        for number, (document, doc) in enumerate(zip(documents, parsed_documents, strict=True), start=1):
             result = {"id": document["id"], "text": document["text"]}
             # Copy provenance only; any input annotations are excluded.
             for key in ("document", "page", "pages", "source", "start", "end", "source_file", "source_sha256",
@@ -151,7 +163,7 @@ def main() -> None:
                         "synthetic", "language", "template_id", "source_revision", "source_url", "source_line"):
                 if key in document:
                     result[key] = document[key]
-            result["entities"] = extract_entities(document["text"], nlp=nlp)
+            result["entities"] = extract_entities(document["text"], doc=doc)
             results.append(result)
             if number == 1 or number % 100 == 0 or number == len(documents):
                 print(f"Processed {number}/{len(documents)}: {document['id']}", flush=True)
@@ -171,6 +183,8 @@ def main() -> None:
             "spacy_version": version("spacy") if use_spacy else None,
             "model_name": nlp.meta.get("name") if use_spacy else None,
             "model_version": nlp.meta.get("version") if use_spacy else None,
+            "spacy_batch_size": batch_size if use_spacy else None,
+            "spacy_pipeline": list(nlp.pipe_names) if use_spacy else [],
             "device": "cpu",
             "git": git_info(),
             "model_load_seconds": load_seconds,

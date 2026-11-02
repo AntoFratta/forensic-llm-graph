@@ -97,10 +97,30 @@ _FORM_TERM = _pattern(
     r"data|nat[oa]|residente|domicilio|indirizzo)$"
 )
 _NAME_WORD = r"[A-ZÀ-ÖØ-Þ][\wÀ-ÿ’'-]+"
+_FORM_NAME_WORD = rf"(?!(?i:nome|cognome)\b){_NAME_WORD}"
+_FORM_NAME_END = (
+    r"(?=\s+(?i:M\s+F\b|F\s+M\b|nat[oa](?:\s*/\s*[oa])?\b|"
+    r"codice\s+fiscale\b|data\s+di\s+nascita\b|sesso\b)|\s*[,;]|\s*$)"
+)
 _FORM_PERSON = re.compile(
     r"\b(?i:sottoscritt[oa](?:\s*/\s*[oa])?)\s*:?\s*"
-    rf"(?P<value>{_NAME_WORD}(?:\s+{_NAME_WORD}){{1,5}}?)"
+    rf"(?P<value>{_FORM_NAME_WORD}(?:\s+{_FORM_NAME_WORD}){{1,5}}?)"
     r"(?=\s+(?i:M\s+F\b|F\s+M\b|nat[oa](?:\s*/\s*[oa])?\b|codice\s+fiscale\b))"
+)
+# Paired personal fields provide context even without a preceding 'sottoscritto'.
+_FORM_FIELDS = [
+    re.compile(
+        rf"\b(?i:{first})\s*[:=]?\s*"
+        rf"(?P<first>{_FORM_NAME_WORD}(?:\s+{_FORM_NAME_WORD}){{0,5}}?)"
+        rf"\s+(?i:{second})\s*[:=]?\s*"
+        rf"(?P<second>{_FORM_NAME_WORD}(?:\s+{_FORM_NAME_WORD}){{0,5}}?)"
+        + _FORM_NAME_END
+    )
+    for first, second in (("cognome", "nome"), ("nome", "cognome"))
+]
+_PERSON_FIELD_LABEL = _pattern(r"\b(?:nome|cognome)\b")
+_RESIDENCE_PREFIX = _pattern(
+    r"^(?:residente|domiciliat[oa])\s+(?:in|a)\s+"
 )
 _SEX_FIELDS = re.compile(r"\s+(?:M\s+F|F\s+M)$")
 
@@ -203,6 +223,12 @@ def _extract_rules(text: str) -> list:
     _add_matches(result, text, _ADDRESS, "LOCATION", "street_address", ("address_boundary_heuristic",))
     _add_matches(result, text, _ROLES, "ROLE", "role_lexicon", ("role_context_unverified",))
     _add_matches(result, text, _FORM_PERSON, "PERSON", "person_form_context", ("person_form_context",))
+    for pattern in _FORM_FIELDS:
+        for match in pattern.finditer(text):
+            for field in ("first", "second"):
+                start, end = match.span(field)
+                result.append(_entity(text, start, end, "PERSON", "rule:person_form_context",
+                                      ("person_form_context",)))
     return result
 
 
@@ -241,14 +267,13 @@ def _extract_times(text: str, entities: list) -> list:
     return times
 
 
-def _extract_nlp(text: str, nlp) -> list:
+def _extract_nlp(text: str, doc) -> list:
     """Map spaCy entity spans to project labels without changing their offsets.
 
     ORG includes institutions as well as companies. Spans without a recognized
     legal suffix retain a tentative COMPANY label and an explicit review flag.
     POS tags supply additional review signals, not automatic rejection rules.
     """
-    doc = nlp(text)
     if doc.text != text:
         raise ValueError("The NLP component must preserve the original text.")
     labels = {"PER": "PERSON", "PERSON": "PERSON", "LOC": "LOCATION",
@@ -275,12 +300,19 @@ def _extract_nlp(text: str, nlp) -> list:
                 _flag(candidate, "common_form_term_as_name")
             if re.search(r"\s+[MF](?:\s+[MF])?$", span.text):
                 _flag(candidate, "possible_form_fields_in_name")
+            if _PERSON_FIELD_LABEL.search(span.text):
+                _flag(candidate, "possible_form_fields_in_name")
         if label == "LOCATION":
             prefix = _ADMINISTRATIVE_PLACE.match(span.text)
             if prefix and prefix.end() < len(span.text):
                 candidate["start"] += prefix.end()
                 candidate["text"] = text[candidate["start"]:candidate["end"]]
                 _flag(candidate, "administrative_place_boundary")
+            prefix = _RESIDENCE_PREFIX.match(candidate["text"])
+            if prefix and prefix.end() < len(candidate["text"]):
+                candidate["start"] += prefix.end()
+                candidate["text"] = text[candidate["start"]:candidate["end"]]
+                _flag(candidate, "residence_place_boundary")
             if _GENERIC_PLACE.fullmatch(candidate["text"].strip()):
                 _flag(candidate, "generic_place_term")
         result.append(candidate)
@@ -290,30 +322,46 @@ def _extract_nlp(text: str, nlp) -> list:
 def _reconcile_form_names(text: str, entities: list) -> list:
     """Prefer a form-based person span over a conflicting NLP prediction.
 
-    Reconciliation requires equal boundaries or only an M/F selection suffix.
-    The NLP prediction is retained as alternative evidence. This does not infer
-    a person's identity or correct arbitrary names outside the form pattern.
+    Reconciliation allows only field labels, separators and an M/F selection
+    suffix around the rule spans. A span covering paired fields is replaced by
+    their separate values. The NLP prediction is retained as alternative evidence.
     """
     names = [e for e in entities if e["source"] == "rule:person_form_context"]
     kept = []
     for entity in entities:
-        matched = None
+        matched = []
         if entity["source"] == "spacy:ner" and entity["label"] in {"PERSON", "LOCATION"}:
-            for name in names:
-                if entity["start"] != name["start"] or entity["end"] < name["end"]:
-                    continue
-                suffix = text[name["end"]:entity["end"]]
-                if not suffix or _SEX_FIELDS.fullmatch(suffix):
-                    # Equal PERSON spans are merged by the ordinary deduplication.
-                    if entity["label"] == "PERSON" and not suffix:
-                        continue
-                    matched = name
-                    break
-        if matched is None:
+            contained = sorted(
+                (name for name in names
+                 if entity["start"] <= name["start"] and name["end"] <= entity["end"]),
+                key=lambda name: name["start"],
+            )
+            if contained:
+                cursor = entity["start"]
+                gaps = []
+                for name in contained:
+                    gaps.append(text[cursor:name["start"]])
+                    cursor = name["end"]
+                gaps.append(text[cursor:entity["end"]])
+                # Do not remove predictions that also contain unexplained words.
+                clean_gaps = all(
+                    not _PERSON_FIELD_LABEL.sub("", gap).strip(" \t\r\n:=")
+                    for gap in gaps[:-1]
+                )
+                suffix = gaps[-1]
+                clean_suffix = (not _PERSON_FIELD_LABEL.sub("", suffix).strip(" \t\r\n:=")
+                                or bool(_SEX_FIELDS.fullmatch(suffix)))
+                equal_person = (len(contained) == 1 and entity["label"] == "PERSON"
+                                and entity["start"] == contained[0]["start"]
+                                and entity["end"] == contained[0]["end"])
+                if clean_gaps and clean_suffix and not equal_person:
+                    matched = contained
+        if not matched:
             kept.append(entity)
         else:
-            matched.setdefault("alternative_predictions", []).append(dict(entity))
-            _flag(matched, "form_name_prediction_adjusted")
+            for name in matched:
+                name.setdefault("alternative_predictions", []).append(dict(entity))
+                _flag(name, "form_name_prediction_adjusted")
     return kept
 
 
@@ -382,12 +430,14 @@ def _finish_entities(result: list) -> list:
     return ordered
 
 
-def extract_entities(text: str, nlp=None) -> list:
+def extract_entities(text: str, nlp=None, *, doc=None) -> list:
     """Return first-pass candidates for one complete document.
 
     Args:
         text: Original document text, without normalization.
         nlp: Loaded Italian spaCy pipeline, or None to run only explicit rules.
+        doc: Already processed spaCy Doc, for use with nlp.pipe. Supply either
+            nlp or doc; passing a Doc avoids processing the same text twice.
 
     Returns:
         Candidate dictionaries sorted by character position. Each contains its
@@ -396,14 +446,19 @@ def extract_entities(text: str, nlp=None) -> list:
 
     Raises:
         TypeError: If text is not a string.
+        ValueError: If both nlp and doc are supplied, or the Doc text differs.
     """
     if not isinstance(text, str):
         raise TypeError("text must be a string")
+    if nlp is not None and doc is not None:
+        raise ValueError("Supply either nlp or doc, not both.")
+    if nlp is not None:
+        doc = nlp(text)
 
     entities = _extract_rules(text)
     entities.extend(_extract_times(text, entities))
-    if nlp is not None:
-        entities.extend(_extract_nlp(text, nlp))
+    if doc is not None:
+        entities.extend(_extract_nlp(text, doc))
     entities = _reconcile_form_names(text, entities)
     entities = _merge_addresses(text, entities)
     return _finish_entities(entities)

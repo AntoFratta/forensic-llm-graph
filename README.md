@@ -102,6 +102,10 @@ python scripts/run_pipeline.py --config configs/baseline.json
 Paths in the configuration are relative to the repository root. Absolute paths,
 including mounted Google Drive paths, are also accepted. The model is loaded once
 and reused across documents. A missing or mismatched model stops the run.
+Texts are processed through `nlp.pipe` with `spacy_batch_size` set to eight in the
+configuration. Results retain input order and original offsets. The same spaCy
+components remain enabled as in the earlier sequential runs, including POS tags.
+Batching is an execution change; its effect on elapsed time must be measured.
 
 For a rules-only check, without installing spaCy:
 
@@ -131,7 +135,7 @@ are:
 ```python
 !python scripts/download_data.py
 !python scripts/prepare_data.py
-!python scripts/run_pipeline.py --output outputs/04_full_corpus_spacy_lg.json
+!python scripts/run_pipeline.py --output outputs/05_batched_form_boundaries_spacy_lg.json
 ```
 
 The setup installs the model in the Colab environment. It does not need to be
@@ -153,6 +157,10 @@ These checks run offline and require no spaCy model. They cover reuse of matchin
 files, protection of changed data, checksum failure, selective ZIP extraction and
 deterministic synthetic selection. Temporary test files are created under the
 ignored `outputs/` directory and removed afterwards.
+Additional checks cover personal-field boundaries, address prefixes, original
+dates, preprocessed NLP input and batch output integrity. Model stand-ins test
+the integration logic; recognition quality and real batch execution require the
+installed model on Colab.
 
 ## Results
 
@@ -177,6 +185,11 @@ When its boundaries agree with an NLP span, apart from an M/F suffix, the
 form-based PERSON candidate takes precedence over a conflicting name prediction.
 The change is flagged and the original prediction is retained in
 `alternative_predictions`. Original spaCy labels are recorded as `nlp_label`.
+Adjacent `Nome` and `Cognome` fields produce separate PERSON values, excluding
+their labels. Conflicting NLP spans are replaced only when the surrounding text
+contains field labels, separators or an M/F suffix; unexplained words remain
+flagged for review. Residence prefixes such as `residente in` are excluded from
+LOCATION spans and the boundary adjustment is recorded.
 An `ORG` prediction without a recognized legal suffix is retained
 as a tentative `COMPANY` candidate with a review flag. A word such as `società`
 alone is not sufficient to remove that flag. Administrative prefixes such as
@@ -191,6 +204,7 @@ The run records the input hash, code revision, uncommitted-change status, model
 and library versions, mode, candidate counts and elapsed times. These are
 development outputs, not final LLM decisions or precision/recall/F1 scores.
 Timing covers the full selected spaCy pipeline, not only its NER component.
+The effective batch size and enabled components are recorded in each run.
 The `by_source` field reports counts separately for each collection, including
 the synthetic diagnostics. Progress is printed every 100 documents.
 Generated JSON files use LF line endings on both Windows and Colab to avoid
