@@ -123,6 +123,14 @@ Review flags are heuristic signals, not confidence scores. Unflagged candidates
 can still be wrong. Names with no proper-noun POS tag, generic place terms,
 legislative abbreviations and possible form fields receive additional review
 flags. POS signals are used only when the NLP pipeline provides those tags.
+Common form terms predicted as names are flagged even when their POS tag is
+PROPN. This vocabulary is an explicit development heuristic and may also flag
+legitimate names; candidates are not discarded solely on that basis.
+The context `sottoscritto/a ... nato/a` or an M/F field can suggest a person span.
+When its boundaries agree with an NLP span, apart from an M/F suffix, the
+form-based PERSON candidate takes precedence over a conflicting name prediction.
+The change is flagged and the original prediction is retained in
+`alternative_predictions`. Original spaCy labels are recorded as `nlp_label`.
 An `ORG` prediction without a recognized legal suffix is retained
 as a tentative `COMPANY` candidate with a review flag. A word such as `società`
 alone is not sufficient to remove that flag. Administrative prefixes such as

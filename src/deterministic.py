@@ -90,6 +90,19 @@ _LEGAL_REFERENCE = _pattern(
     r"^(?:d\s*\.\s*lgs\.?|d\s*\.\s*p\s*\.\s*r\.?|"
     r"d\s*\.\s*l\.?|art(?:t)?\.?|legge|decreto)$"
 )
+# Form vocabulary is a review signal, not a list of names to discard.
+_FORM_TERM = _pattern(
+    r"^(?:chiede|richiede|dichiara|autorizza|comunica|attesta|certifica|"
+    r"richiesta|dichiarazione|oggetto|firma|giorn[oi]|mes[ei]|ann[oi]|"
+    r"data|nat[oa]|residente|domicilio|indirizzo)$"
+)
+_NAME_WORD = r"[A-ZÀ-ÖØ-Þ][\wÀ-ÿ’'-]+"
+_FORM_PERSON = re.compile(
+    r"\b(?i:sottoscritt[oa](?:\s*/\s*[oa])?)\s*:?\s*"
+    rf"(?P<value>{_NAME_WORD}(?:\s+{_NAME_WORD}){{1,5}}?)"
+    r"(?=\s+(?i:M\s+F\b|F\s+M\b|nat[oa](?:\s*/\s*[oa])?\b|codice\s+fiscale\b))"
+)
+_SEX_FIELDS = re.compile(r"\s+(?:M\s+F|F\s+M)$")
 
 
 def load_nlp(model_name: str):
@@ -189,6 +202,7 @@ def _extract_rules(text: str) -> list:
                     _flag(candidate, "tax_code_or_vat_ambiguous")
     _add_matches(result, text, _ADDRESS, "LOCATION", "street_address", ("address_boundary_heuristic",))
     _add_matches(result, text, _ROLES, "ROLE", "role_lexicon", ("role_context_unverified",))
+    _add_matches(result, text, _FORM_PERSON, "PERSON", "person_form_context", ("person_form_context",))
     return result
 
 
@@ -251,11 +265,14 @@ def _extract_nlp(text: str, nlp) -> list:
         if not label:
             continue
         candidate = _entity(text, span.start_char, span.end_char, label, "spacy:ner", reasons)
+        candidate["nlp_label"] = span.label_
         if label in {"PERSON", "LOCATION"}:
             if has_pos and not any(token.pos_ == "PROPN" for token in span):
                 _flag(candidate, "name_without_proper_noun")
             if _LEGAL_REFERENCE.fullmatch(span.text.strip()):
                 _flag(candidate, "legal_reference_as_name")
+            if _FORM_TERM.fullmatch(span.text.strip()):
+                _flag(candidate, "common_form_term_as_name")
             if re.search(r"\s+[MF](?:\s+[MF])?$", span.text):
                 _flag(candidate, "possible_form_fields_in_name")
         if label == "LOCATION":
@@ -270,6 +287,36 @@ def _extract_nlp(text: str, nlp) -> list:
     return result
 
 
+def _reconcile_form_names(text: str, entities: list) -> list:
+    """Prefer a form-based person span over a conflicting NLP prediction.
+
+    Reconciliation requires equal boundaries or only an M/F selection suffix.
+    The NLP prediction is retained as alternative evidence. This does not infer
+    a person's identity or correct arbitrary names outside the form pattern.
+    """
+    names = [e for e in entities if e["source"] == "rule:person_form_context"]
+    kept = []
+    for entity in entities:
+        matched = None
+        if entity["source"] == "spacy:ner" and entity["label"] in {"PERSON", "LOCATION"}:
+            for name in names:
+                if entity["start"] != name["start"] or entity["end"] < name["end"]:
+                    continue
+                suffix = text[name["end"]:entity["end"]]
+                if not suffix or _SEX_FIELDS.fullmatch(suffix):
+                    # Equal PERSON spans are merged by the ordinary deduplication.
+                    if entity["label"] == "PERSON" and not suffix:
+                        continue
+                    matched = name
+                    break
+        if matched is None:
+            kept.append(entity)
+        else:
+            matched.setdefault("alternative_predictions", []).append(dict(entity))
+            _flag(matched, "form_name_prediction_adjusted")
+    return kept
+
+
 def _merge_addresses(text: str, result: list) -> list:
     """Extend address candidates with adjacent city names and remove inner places.
 
@@ -282,6 +329,7 @@ def _merge_addresses(text: str, result: list) -> list:
     blocked_reasons = {
         "generic_place_term", "name_without_proper_noun",
         "legal_reference_as_name", "possible_form_fields_in_name",
+        "common_form_term_as_name",
     }
     for address in addresses:
         for place in result:
@@ -319,6 +367,8 @@ def _finish_entities(result: list) -> list:
         else:
             existing = unique[key]
             existing["source"] += ";" + candidate["source"]
+            if "nlp_label" in candidate:
+                existing["nlp_label"] = candidate["nlp_label"]
             for reason in candidate["review_reasons"]:
                 _flag(existing, reason)
     ordered = sorted(unique.values(), key=lambda e: (e["start"], e["end"], e["label"]))
@@ -354,5 +404,6 @@ def extract_entities(text: str, nlp=None) -> list:
     entities.extend(_extract_times(text, entities))
     if nlp is not None:
         entities.extend(_extract_nlp(text, nlp))
+    entities = _reconcile_form_names(text, entities)
     entities = _merge_addresses(text, entities)
     return _finish_entities(entities)
