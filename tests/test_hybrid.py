@@ -31,6 +31,12 @@ class PassageTests(unittest.TestCase):
         self.assertEqual(passages[0]["end"], 250)
         self.assertEqual(sum(len(p["candidates"]) for p in passages), 1)
 
+    def test_short_final_remainder_is_absorbed_without_losing_text(self):
+        text = "Un testo italiano da dividere. " * 4
+        passages = build_passages([{"id": "one", "text": text, "entities": []}], 115, 10)
+        self.assertEqual(len(passages), 1)
+        self.assertEqual(passages[0]["core_end"], len(text))
+
     def test_smoke_sampling_is_balanced_reproducible_and_uses_distinct_documents(self):
         documents = [{"id": f"{source}-{index}", "source": source,
                       "text": "A long example. " * 20, "entities": []}
@@ -77,10 +83,18 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(entities[0]["start"], 10 + self.text.rindex("Anna"))
         self.assertTrue(entities[0]["llm_reviewed"])
 
+    def test_unique_match_resolves_an_incorrect_index_with_a_recorded_flag(self):
+        self.passage["text"] = "Elena vive qui."
+        entity = self.parse([{"text": "Elena", "label": "PERSON", "occurrence": 2}])[0]
+        self.assertEqual(entity["start"], self.passage["start"])
+        self.assertIn("occurrence_index_resolved_from_unique_match", entity["review_reasons"])
+        self.assertTrue(entity["needs_review"])
+
     def test_invented_values_invalid_labels_and_ambiguous_occurrences_fail(self):
         for item in ({"text": "Elena", "label": "PERSON"},
                      {"text": "Anna", "label": "NEW_CATEGORY", "occurrence": 1},
                      {"text": "Anna", "label": "PERSON"},
+                     {"text": "Anna", "label": "PERSON", "occurrence": 3},
                      {"text": "Anna", "label": "PERSON", "occurrence": True}):
             with self.subTest(item=item), self.assertRaises(ValueError):
                 self.parse([item])
@@ -97,7 +111,9 @@ class ReviewTests(unittest.TestCase):
 
     def test_prompt_does_not_include_gold_or_run_metadata(self):
         self.passage["annotations"] = [{"secret_gold": True}]
+        self.passage["candidates"] = [{"text": "invented candidate", "label": "PERSON"}]
         self.assertNotIn("secret_gold", json.dumps(review_messages(self.passage)))
+        self.assertNotIn("invented candidate", json.dumps(review_messages(self.passage)))
 
     def test_only_successful_cores_replace_candidates_and_input_is_unchanged(self):
         text = "Email: anna@example.org. Email: elena@example.org."
@@ -124,7 +140,7 @@ class PerplexityArithmeticTests(unittest.TestCase):
 
         class Tokenizer:
             def __call__(self, texts, **kwargs):
-                return {"input_ids": [[1, 2] if text == "short" else [1, 2, 3] for text in texts]}
+                return self.pad({"input_ids": [[1, 2] if text == "short" else [1, 2, 3] for text in texts]})
 
             def pad(self, inputs, **kwargs):
                 maximum = max(len(tokens) for tokens in inputs["input_ids"])
@@ -139,6 +155,7 @@ class PerplexityArithmeticTests(unittest.TestCase):
             probabilities = torch.tensor(rows[:input_ids.shape[1]])
             return SimpleNamespace(logits=probabilities.log().unsqueeze(0).repeat(input_ids.shape[0], 1, 1))
 
+        model.device = torch.device("cpu")
         passages = [{"id": "short", "text": "short"}, {"id": "long", "text": "long"}]
         with patch("src.language_models.require_cuda", return_value=torch), patch.object(torch.cuda, "synchronize"):
             batch = next(perplexity_batches(passages, {"max_tokens": 8, "batch_size": 2}, model, Tokenizer()))

@@ -236,12 +236,20 @@ GPU memory, Linux peak process RAM, token counts and generation times are saved.
 No training or fine-tuning is performed.
 
 Passages have disjoint 1,200-character cores and 200 characters of surrounding
-context. The code preserves every character and assigns entities by their start
+context. A final remainder shorter than one quarter of the core size is absorbed
+into its preceding core. The code preserves every character and assigns entities by their start
 offset. Qwen returns exact strings and occurrence indices; Python resolves the
-original offsets. Only a fully valid, non-truncated response can replace the
+original offsets. An incorrect positive index for a unique exact string can be
+resolved unambiguously and is explicitly flagged. Repeated-string indices are
+still required to identify a real occurrence. Only a fully valid, non-truncated response can replace the
 core's original candidates. Failed responses retain the first-pass candidates
 and remain visible in the output. Syntactic validity and exact text matching
 do not establish semantic correctness. Original first-pass files stay intact.
+First-pass candidates select and prioritize passages but are not shown in the
+Qwen prompt. Qwen extracts independently from the source text to reduce copying
+of initial errors. The initial smoke test loaded both models successfully on a
+T4, with seven syntactically valid responses out of eight; semantic omissions
+remain and require separate evaluation.
 
 The smoke test sends all eight sampled passages to Qwen to test execution across
 collections. It also records what the diagnostic routing policy would select;

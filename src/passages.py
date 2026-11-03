@@ -11,7 +11,9 @@ def build_passages(documents: list, core_chars: int, context_chars: int) -> list
 
     An entity belongs to the core containing its start offset. Context can appear
     in neighbouring passages, but ownership prevents duplicate merge decisions.
-    A word boundary is preferred near the target size. Text is never normalized.
+    A word boundary is preferred near the target size. A final remainder shorter
+    than a quarter of the target is absorbed into the preceding core, avoiding
+    nearly empty review windows. Text is never normalized.
     Context is extended when an owned first-pass candidate would otherwise be
     cut; model token limits are checked separately rather than silently truncating.
     """
@@ -30,6 +32,8 @@ def build_passages(documents: list, core_chars: int, context_chars: int) -> list
                                  if text[position].isspace()), None)
                 if boundary is not None:
                     core_end = boundary
+                if len(text) - core_end < core_chars // 4:
+                    core_end = len(text)
             owned = [entity for entity in document["entities"]
                      if core_start <= entity["start"] < core_end]
             start = max(0, core_start - context_chars)

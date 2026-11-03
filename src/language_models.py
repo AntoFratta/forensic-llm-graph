@@ -6,9 +6,14 @@ PyTorch, Transformers, model weights or a GPU.
 
 import gc
 import math
+import os
 import time
 
 from src.llm_filter import parse_entities, review_messages
+
+
+# This runner uses PyTorch exclusively; do not initialize an unrelated TF backend.
+os.environ.setdefault("USE_TF", "0")
 
 
 def require_cuda():
@@ -37,7 +42,7 @@ def load_model(settings: dict, quantized: bool):
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
-    kwargs = {"revision": settings["revision"], "torch_dtype": torch.float16,
+    kwargs = {"revision": settings["revision"], "dtype": torch.float16,
               "device_map": {"": 0}, "low_cpu_mem_usage": True,
               "attn_implementation": "sdpa", "use_safetensors": True}
     if quantized:
@@ -69,18 +74,20 @@ def perplexity_batches(passages: list, settings: dict, model, tokenizer):
     for offset in range(0, len(passages), settings["batch_size"]):
         batch = passages[offset:offset + settings["batch_size"]]
         encodings = tokenizer([passage["text"] for passage in batch], add_special_tokens=True,
-                             truncation=False)["input_ids"]
+                              padding=True, truncation=False, return_tensors="pt")
+        lengths = encodings["attention_mask"].sum(dim=1).tolist()
         accepted = []
         results = {}
-        for passage, tokens in zip(batch, encodings, strict=True):
-            if not 2 <= len(tokens) <= maximum:
-                results[passage["id"]] = {"status": "token_limit" if len(tokens) > maximum else "too_short",
-                                           "token_count": len(tokens), "mean_nll": None, "perplexity": None}
+        for index, (passage, length) in enumerate(zip(batch, lengths, strict=True)):
+            if not 2 <= length <= maximum:
+                results[passage["id"]] = {"status": "token_limit" if length > maximum else "too_short",
+                                           "token_count": length, "mean_nll": None, "perplexity": None}
             else:
-                accepted.append((passage, tokens))
+                accepted.append((index, passage, length))
         if accepted:
-            inputs = tokenizer.pad({"input_ids": [tokens for _, tokens in accepted]},
-                                   padding=True, return_tensors="pt").to("cuda")
+            indices = [index for index, _, _ in accepted]
+            width = max(length for _, _, length in accepted)
+            inputs = {name: values[indices, :width].to(model.device) for name, values in encodings.items()}
             started = time.perf_counter()
             with torch.inference_mode():
                 logits = model(**inputs, use_cache=False).logits
@@ -94,12 +101,12 @@ def perplexity_batches(passages: list, settings: dict, model, tokenizer):
                 means = (losses.sum(dim=1) / counts).tolist()
             torch.cuda.synchronize()
             elapsed = time.perf_counter() - started
-            for (passage, tokens), loss in zip(accepted, means, strict=True):
+            for (_, passage, length), loss in zip(accepted, means, strict=True):
                 finite = math.isfinite(loss)
                 value = math.exp(loss) if finite and loss < 700 else None
                 results[passage["id"]] = {
                     "status": "ok" if value is not None else "nonfinite_loss",
-                    "token_count": len(tokens), "scored_tokens": len(tokens) - 1,
+                    "token_count": length, "scored_tokens": length - 1,
                     "mean_nll": loss if finite else None, "perplexity": value,
                     "batch_inference_seconds": elapsed,
                 }
@@ -117,11 +124,12 @@ def review_passage(passage: dict, settings: dict, model, tokenizer) -> dict:
     if length > settings["max_input_tokens"]:
         return {"status": "token_limit", "input_tokens": length, "entities": [],
                 "error": "Prompt exceeds max_input_tokens; first-pass candidates retained."}
-    inputs = inputs.to("cuda")
+    inputs = inputs.to(model.device)
     started = time.perf_counter()
     with torch.inference_mode():
         output = model.generate(
             **inputs, do_sample=False, max_new_tokens=settings["max_new_tokens"],
+            temperature=None, top_p=None, top_k=None,
             pad_token_id=tokenizer.pad_token_id, use_cache=True,
         )
     torch.cuda.synchronize()
