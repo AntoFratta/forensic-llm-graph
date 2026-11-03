@@ -86,6 +86,8 @@ def validate_config(config: dict) -> None:
                 raise ValueError(f"{role}.{key} must be a positive integer.")
     if config["llm"].get("quantization") != "nf4" or config["llm"].get("enable_thinking") is not False:
         raise ValueError("This runner uses NF4 quantization and disabled thinking.")
+    if type(config["llm"].get("validation_retries")) is not int or not 0 <= config["llm"]["validation_retries"] <= 1:
+        raise ValueError("llm.validation_retries must be zero or one.")
     if type(config["passages"].get("seed")) is not int:
         raise ValueError("passages.seed must be an integer.")
     if type(config["passages"].get("smoke_per_source")) is not int or config["passages"]["smoke_per_source"] < 1:
@@ -290,6 +292,8 @@ def main() -> None:
                     "peak_host_memory_bytes": peak_host_memory(),
                     "reviewed_passage_count": len(reviews),
                     "review_status_counts": dict(Counter(r["status"] for r in reviews.values())),
+                    "generation_attempt_count": sum(r.get("attempt_count", 1) for r in reviews.values()),
+                    "merge_policy": "preserve_unflagged_structured_rules; complete_replace_other; partial_add_only",
                     "perplexity_status_counts": dict(Counter(s["status"] for s in scores.values())),
                     "by_source": summarize_sources(merged),
                     "candidate_count": sum(len(d["entities"]) for d in merged)})

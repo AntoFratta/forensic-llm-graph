@@ -9,7 +9,7 @@ import math
 import os
 import time
 
-from src.llm_filter import parse_entities, review_messages
+from src.llm_filter import parse_review, review_messages
 
 
 # This runner uses PyTorch exclusively; do not initialize an unrelated TF backend.
@@ -114,10 +114,10 @@ def perplexity_batches(passages: list, settings: dict, model, tokenizer):
         yield results
 
 
-def review_passage(passage: dict, settings: dict, model, tokenizer) -> dict:
-    """Generate one bounded JSON response and preserve failures for inspection."""
+def _review_once(passage: dict, settings: dict, model, tokenizer, feedback=None) -> dict:
+    """Generate and validate one response, without modifying original candidates."""
     torch = require_cuda()
-    prompt = tokenizer.apply_chat_template(review_messages(passage), tokenize=False,
+    prompt = tokenizer.apply_chat_template(review_messages(passage, feedback), tokenize=False,
                                           add_generation_prompt=True, enable_thinking=False)
     inputs = tokenizer(prompt, add_special_tokens=False, return_tensors="pt")
     length = inputs["input_ids"].shape[1]
@@ -141,13 +141,37 @@ def review_passage(passage: dict, settings: dict, model, tokenizer) -> dict:
     result = {"status": "truncated" if truncated else "ok", "raw_response": response,
               "input_tokens": length, "output_tokens": len(generated),
               "inference_seconds": time.perf_counter() - started, "entities": []}
-    if not truncated:
-        try:
-            result["entities"] = parse_entities(response, passage, settings["model"])
-        except ValueError as exc:
-            result["status"] = "invalid_response"
-            result["error"] = str(exc)
+    if truncated:
+        result["validation_errors"] = [{"error": "Output truncated; use shorter exact contexts while keeping all mentions."}]
+    else:
+        result.update(parse_review(response, passage, settings["model"]))
     return result
+
+
+def review_passage(passage: dict, settings: dict, model, tokenizer) -> dict:
+    """Allow one configured validation retry and record every generation attempt.
+
+    A failed retry cannot erase an earlier partial response. The latest complete
+    response is used when available; otherwise the latest partial response can
+    contribute additions only. No retry uses gold labels or source annotations.
+    """
+    attempts = []
+    feedback = None
+    for _ in range(settings.get("validation_retries", 1) + 1):
+        result = _review_once(passage, settings, model, tokenizer, feedback)
+        attempts.append(result)
+        if result["status"] in {"ok", "token_limit"}:
+            break
+        feedback = result.get("validation_errors", [{"error": "Return a complete valid JSON object."}])
+    selected = len(attempts) - 1
+    if attempts[selected]["status"] not in {"ok", "partial"}:
+        selected = next((index for index in range(len(attempts) - 1, -1, -1)
+                         if attempts[index]["status"] == "partial"), selected)
+    return {**attempts[selected], "attempts": attempts, "selected_attempt": selected + 1,
+            "attempt_count": len(attempts),
+            "inference_seconds": sum(attempt.get("inference_seconds", 0) for attempt in attempts),
+            "total_input_tokens": sum(attempt.get("input_tokens", 0) for attempt in attempts),
+            "total_output_tokens": sum(attempt.get("output_tokens", 0) for attempt in attempts)}
 
 
 def release_cuda_memory() -> None:

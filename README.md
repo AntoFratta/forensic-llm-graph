@@ -222,8 +222,8 @@ through the Colab Secret named `HF_TOKEN`, not a notebook cell or Git file.
 
 Open `notebooks/second_pass_colab.ipynb` from GitHub and upload the saved run 05
 JSON through the Colab file panel. The notebook reuses its complete texts and
-candidates rather than downloading raw data and rerunning spaCy. It selects two
-passages per source automatically for the first technical test:
+candidates rather than downloading raw data and rerunning spaCy. The current
+robustness test selects four passages per source automatically, sixteen in total:
 
 ```bash
 python scripts/run_hybrid.py --input /content/05_batched_form_boundaries_spacy_lg.json --smoke-test
@@ -238,20 +238,36 @@ No training or fine-tuning is performed.
 Passages have disjoint 1,200-character cores and 200 characters of surrounding
 context. A final remainder shorter than one quarter of the core size is absorbed
 into its preceding core. The code preserves every character and assigns entities by their start
-offset. Qwen returns exact strings and occurrence indices; Python resolves the
-original offsets. An incorrect positive index for a unique exact string can be
-resolved unambiguously and is explicitly flagged. Repeated-string indices are
-still required to identify a real occurrence. Only a fully valid, non-truncated response can replace the
-core's original candidates. Failed responses retain the first-pass candidates
-and remain visible in the output. Syntactic validity and exact text matching
-do not establish semantic correctness. Original first-pass files stay intact.
+offset. Qwen returns exact strings with short exact context quotations; Python
+resolves original offsets without asking the model to count occurrences. The
+earlier index format remains readable for archived results. A unique literal
+mention can resolve incorrect optional alignment metadata with an explicit flag.
+Ambiguous repeated strings are never assigned a position by guessing.
+
+Validation checks the JSON envelope, each individual item, structured formats,
+word boundaries and clear type conflicts such as currency amounts labelled TIME.
+It does not prove semantic correctness. Fiscal-code shape checks accept both
+the 16-character form and 11-digit numeric codes; they do not distinguish an
+11-digit fiscal code from a VAT number without context or validate checksums.
+At most one additional generation receives validation feedback. Every attempt,
+its errors and its token/time cost are recorded. The prompt examples are invented
+to illustrate general conventions and do not contain corpus annotations.
+
+Complete valid responses replace other first-pass predictions in reviewed cores,
+while unflagged structured rule mentions survive an LLM omission. This is an
+explicit fusion policy, not a calibrated confidence guarantee. Partial responses
+can contribute validated additions but cannot authorize deletion of original
+candidates. Invalid or truncated responses retain the original candidates.
+Conflicts remain flagged. A complete LLM street-address span may absorb adjacent
+postal components, preserving the source spelling and absorbed evidence.
+Original first-pass files stay intact.
 First-pass candidates select and prioritize passages but are not shown in the
 Qwen prompt. Qwen extracts independently from the source text to reduce copying
 of initial errors. The initial smoke test loaded both models successfully on a
 T4, with seven syntactically valid responses out of eight; semantic omissions
 remain and require separate evaluation.
 
-The smoke test sends all eight sampled passages to Qwen to test execution across
+The current smoke test sends all sixteen sampled passages to Qwen to test execution across
 collections. It also records what the diagnostic routing policy would select;
 it is not a quality evaluation or a selective-processing benchmark. Only the
 represented documents appear in this output, with their complete original text

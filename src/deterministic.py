@@ -180,6 +180,28 @@ def _flag(entity: dict, reason: str) -> None:
         entity["review_reasons"].append(reason)
 
 
+def structured_format_valid(value: str, label: str) -> bool | None:
+    """Check a structured mention's shape without changing its original spelling.
+
+    These checks do not establish existence, ownership or checksum validity.
+    None means that this category has no general format check here.
+    """
+    compact = re.sub(r"\s", "", value)
+    if label == "EMAIL":
+        return bool(_EMAIL.fullmatch(value))
+    if label == "TAX_CODE":
+        # Numeric fiscal codes also exist for entities and provisional assignments.
+        return bool(_TAX_CODE.fullmatch(compact) or re.fullmatch(r"\d{11}", compact))
+    if label == "VAT_NUMBER":
+        return bool(re.fullmatch(r"[\d .]+", value)) and len(re.sub(r"\D", "", value)) == 11
+    if label == "PHONE":
+        return bool(re.fullmatch(r"\+?[\d\s/().-]+", value)) and 6 <= len(re.sub(r"\D", "", value)) <= 15
+    if label == "BANK_ACCOUNT":
+        return bool(_ITALIAN_IBAN.fullmatch(value) or _COMPACT_IBAN.fullmatch(compact)
+                    or re.fullmatch(r"\d(?:[ /-]?\d){3,19}", value))
+    return None
+
+
 def _extract_rules(text: str) -> list:
     """Extract structured mentions, addresses and role candidates.
 

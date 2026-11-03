@@ -1,10 +1,10 @@
 {
   "input_path": "outputs/05_batched_form_boundaries_spacy_lg.json",
-  "output_path": "outputs/07_hybrid_validation.json",
+  "output_path": "outputs/08_hybrid_robustness.json",
   "passages": {
     "core_chars": 1200,
     "context_chars": 200,
-    "smoke_per_source": 2,
+    "smoke_per_source": 4,
     "seed": 42
   },
   "perplexity": {
@@ -22,8 +22,9 @@
   "llm": {
     "model": "Qwen/Qwen3-8B",
     "revision": "b968826d9c46dd6066d109eabc6255188de91218",
-    "max_input_tokens": 2048,
-    "max_new_tokens": 1024,
+    "max_input_tokens": 3072,
+    "max_new_tokens": 1536,
+    "validation_retries": 1,
     "quantization": "nf4",
     "enable_thinking": false
   }
