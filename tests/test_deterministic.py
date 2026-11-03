@@ -106,6 +106,17 @@ class ExtractionTests(unittest.TestCase):
         entities = extract_entities(text, doc=doc)
         self.assertIn("name_without_proper_noun", entities[0]["review_reasons"])
 
+    def test_account_context_variants_do_not_capture_payment_or_document_ids(self):
+        for prefix in ("numero di conto", "bonifico sul conto", "contratto relativo al conto", "conto postale"):
+            with self.subTest(prefix=prefix):
+                entities = extract_entities(f"{prefix} 001234567890.")
+                accounts = [e for e in entities if e["label"] == "BANK_ACCOUNT"]
+                self.assertEqual([e["text"] for e in accounts], ["001234567890"])
+        for prefix in ("copia del contratto", "a mezzo", "assegno n.", "bonifico CRO"):
+            with self.subTest(prefix=prefix):
+                self.assertFalse(any(e["label"] == "BANK_ACCOUNT"
+                                     for e in extract_entities(f"{prefix} 001234567890.")))
+
     def test_single_call_and_preprocessed_document_agree(self):
         text = "Anna vive a Torino."
         doc = NLPDocument(text, [NLPSpan(text, "Anna", "PER"), NLPSpan(text, "Torino", "LOC")])

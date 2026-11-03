@@ -1,0 +1,30 @@
+{
+  "input_path": "outputs/05_batched_form_boundaries_spacy_lg.json",
+  "output_path": "outputs/06_hybrid_smoke_test.json",
+  "passages": {
+    "core_chars": 1200,
+    "context_chars": 200,
+    "smoke_per_source": 2,
+    "seed": 42
+  },
+  "perplexity": {
+    "model": "sapienzanlp/Minerva-350M-base-v1.0",
+    "revision": "65e78a1551d0ea16f3f5860e846b8bd6b5e9a59b",
+    "max_tokens": 1024,
+    "batch_size": 4
+  },
+  "routing": {
+    "perplexity_threshold": null,
+    "diagnostic_percentile": 0.8,
+    "max_review_fraction": 0.2,
+    "max_review_passages": 500
+  },
+  "llm": {
+    "model": "Qwen/Qwen3-8B",
+    "revision": "b968826d9c46dd6066d109eabc6255188de91218",
+    "max_input_tokens": 2048,
+    "max_new_tokens": 1024,
+    "quantization": "nf4",
+    "enable_thinking": false
+  }
+}

@@ -1,14 +1,17 @@
 # Forensic LLM Graph
 
 Experimental master's thesis project on Italian forensic entity recognition.
-The current implementation is the first pass: rules and an Italian spaCy model.
-Selective LLM processing and perplexity will be added in later stages.
+The first pass combines rules and an Italian spaCy model. The second-pass runner
+adds Minerva perplexity and selective Qwen review. Its first real GPU execution
+is a technical smoke test; task accuracy has not yet been established.
 
 ## Environment
 
 Use Python 3.10–3.13. The baseline uses spaCy 3.8.11 and `it_core_news_lg` 3.8.0.
 Both are installed by `requirements.txt`, including the model's fixed download
 URL and checksum. No model files are stored in this repository.
+The same requirements file includes the libraries for Minerva and Qwen; their
+weights are downloaded when the second-pass runner loads them.
 
 ```bash
 python -m pip install -r requirements.txt
@@ -209,3 +212,65 @@ The `by_source` field reports counts separately for each collection, including
 the synthetic diagnostics. Progress is printed every 100 documents.
 Generated JSON files use LF line endings on both Windows and Colab to avoid
 platform-dependent input hashes caused by serialization alone.
+
+## Second pass
+
+Install the shared `requirements.txt` in a T4 Colab runtime. It includes both
+stages and reuses the installed CUDA PyTorch when compatible. Minerva's gated
+repository requires acceptance on Hugging Face; provide a permitted read token
+through the Colab Secret named `HF_TOKEN`, not a notebook cell or Git file.
+
+Open `notebooks/second_pass_colab.ipynb` from GitHub and upload the saved run 05
+JSON through the Colab file panel. The notebook reuses its complete texts and
+candidates rather than downloading raw data and rerunning spaCy. It selects two
+passages per source automatically for the first technical test:
+
+```bash
+python scripts/run_hybrid.py --input /content/05_batched_form_boundaries_spacy_lg.json --smoke-test
+```
+
+`configs/hybrid.json` pins both model revisions. Minerva-350M scores original
+passage text, excluding padding. It is released before Qwen3-8B loads with NF4
+weights and FP16 computation. Qwen's thinking mode is disabled. Model loading,
+GPU memory, Linux peak process RAM, token counts and generation times are saved.
+No training or fine-tuning is performed.
+
+Passages have disjoint 1,200-character cores and 200 characters of surrounding
+context. The code preserves every character and assigns entities by their start
+offset. Qwen returns exact strings and occurrence indices; Python resolves the
+original offsets. Only a fully valid, non-truncated response can replace the
+core's original candidates. Failed responses retain the first-pass candidates
+and remain visible in the output. Syntactic validity and exact text matching
+do not establish semantic correctness. Original first-pass files stay intact.
+
+The smoke test sends all eight sampled passages to Qwen to test execution across
+collections. It also records what the diagnostic routing policy would select;
+it is not a quality evaluation or a selective-processing benchmark. Only the
+represented documents appear in this output, with their complete original text
+and the remaining first-pass candidates. It does not claim the full corpus has
+received LLM review.
+
+The runner can prepare passages offline, without model dependencies:
+
+```bash
+python scripts/run_hybrid.py --prepare-only --smoke-test --output outputs/hybrid_preview.json
+```
+
+For later development analysis, `--score-only` calculates perplexity without
+loading Qwen. An extended review requires a fixed `perplexity_threshold` chosen
+on development data. The sample's diagnostic 80th percentile is available only
+in smoke mode. Routing combines review signals, possible omissions and high
+perplexity, capped by an explicit fraction and passage budget. Current limits
+are provisional engineering settings, not validated confidence thresholds.
+
+Completed scores and responses are flushed to a companion `.checkpoints.jsonl`
+file. If a cell is interrupted, rerun the same command with `--resume`. Recovery
+requires matching input bytes, code, model settings, scope and inference-library
+versions. An existing final result is protected; choose a new output or use
+`--overwrite` intentionally. Save the checkpoint manually before deleting the
+runtime if recovery in another session is needed. No automatic download cell
+is included.
+
+The broader account-context rules (`sul conto`, `numero di conto`, `conto postale`)
+take effect in newly generated first-pass runs. Reusing run 05 deliberately
+preserves that run's original predictions for this model-loading check.

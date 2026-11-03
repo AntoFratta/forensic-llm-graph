@@ -36,7 +36,8 @@ _PHONE = _pattern(
 _ITALIAN_IBAN = re.compile(r"\bIT\s*\d\s*\d\s*[A-Z](?:[ \t]*[A-Z0-9]){22}\b", re.I | re.ASCII)
 _COMPACT_IBAN = re.compile(r"\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b", re.I | re.ASCII)
 _ACCOUNT = _pattern(
-    r"\b(?:c\s*/\s*c|conto\s+corrente|conto\s+bancario)"
+    r"\b(?:c\s*/\s*c|conto\s+(?:corrente|bancario|postale)|"
+    r"numero\s+di\s+conto|(?:sul|al)\s+conto)"
     r"(?:\s+(?:postale|bancario))?\s*(?:n(?:umero)?\.?)?\s*[:=]?\s*"
     r"(?P<value>\d(?:[ /-]?\d){3,19})(?!\d)"
 )
@@ -200,6 +201,8 @@ def _extract_rules(text: str) -> list:
                     candidate["subtype"] = "iban"
                 else:
                     prefix = text[max(0, candidate["start"]-50):candidate["start"]]
+                    if re.search(r"(?:sul|al)\s+conto\s*(?:n(?:umero)?\.?)?\s*[:=]?\s*$", prefix, re.I):
+                        _flag(candidate, "account_context_unverified")
                     if re.search(r"postale\s*(?:n(?:umero)?\.?)?\s*[:=]?\s*$", prefix, re.I):
                         candidate["subtype"] = "postal_account"
                     else:
