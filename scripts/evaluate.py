@@ -1,12 +1,16 @@
 """Evaluate reviewed entity spans and optionally calibrate routing on development."""
 
 import argparse
+import ast
+from collections import Counter
 from copy import deepcopy
 import hashlib
 import json
 import math
 from pathlib import Path
 import sys
+import re
+import subprocess
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -14,7 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.run_hybrid import code_hash, load_first_pass, write_result
 from scripts.run_pipeline import project_path
 from src.evaluation import load_reference, reference_passages, score_reference
-from src.llm_filter import merge_reviews
+from src.llm_filter import merge_reviews, parse_review
 from src.passages import build_passages, select_passages
 
 
@@ -22,6 +26,8 @@ def routing_trial(reference, documents, passages, scores, reviews, settings, use
     """Reuse recorded responses to compare routing policies without new generation."""
     routing = select_passages(passages, scores, settings, use_perplexity=use_perplexity)
     selected = {key: reviews[key] for key, decision in routing["decisions"].items() if decision["selected"]}
+    if any(review is None for review in selected.values()):
+        raise ValueError("A policy selected an unreviewed passage; generate the routing union with --compare-routing.")
     merged = merge_reviews(documents, passages, selected)
     return {"threshold": routing["threshold"], "threshold_mode": routing["threshold_mode"],
             "selected_count": len(selected), "budget": routing["budget"],
@@ -45,7 +51,9 @@ def calibrate(reference, documents, passages, settings):
                     if score["status"] == "ok" and score["perplexity"] is not None)
     if not values:
         raise ValueError("No valid development perplexities are available.")
+    fallback = values[max(0, math.ceil(len(values) * settings["diagnostic_percentile"]) - 1)]
     thresholds = {values[max(0, math.ceil(len(values) * q) - 1)] for q in (0.5, 0.75, 0.9)}
+    thresholds.add(fallback)
     thresholds.add(math.nextafter(values[-1], math.inf))
     trials = [routing_trial(reference, documents, passages, scores, reviews,
                             {**settings, "perplexity_threshold": threshold}) for threshold in sorted(thresholds)]
@@ -55,12 +63,62 @@ def calibrate(reference, documents, passages, settings):
         value = source_counts.get("f1")
         return (-1 if value is None else value, -trial["selected_count"], trial["threshold"])
 
-    chosen = max(trials, key=objective)
+    quality_varies = len({objective(trial)[0] for trial in trials}) > 1
+    chosen = (max(trials, key=objective) if quality_varies else
+              next(trial for trial in trials if trial["threshold"] == fallback))
     without_ppl = routing_trial(reference, documents, passages, scores, reviews, settings, use_perplexity=False)
     return {"objective": "micro F1 on REDIT, DICE and ArchivioAntimafia; ties: fewer reviews, higher threshold",
             "budget_scope": "the source-balanced annotated reference subset, not the full corpus",
+            "threshold_quality_varies_on_development": quality_varies,
+            "distinct_selected_sets": len({tuple(trial["selected_passage_ids"]) for trial in trials}),
+            "threshold_selection": ("development_F1_search" if quality_varies else
+                                    "fixed_development_percentile_fallback; no measured F1 preference"),
             "chosen_threshold": chosen["threshold"], "chosen": chosen,
             "without_perplexity": without_ppl, "trials": trials}
+
+
+def replay_validation(hybrid: dict, documents: list) -> dict:
+    """Revalidate saved development responses only if generation code is unchanged.
+
+    Git preserves the original prompt and generation implementation. Comparing
+    them prevents reusing old responses as evidence for a different prompt or
+    model backend. Model outputs and generation attempts remain untouched on disk.
+    """
+    run = hybrid["run"]
+    commit = run.get("git", {}).get("commit", "")
+    if not re.fullmatch(r"[a-f0-9]{40}", commit):
+        raise ValueError("Replay requires the original generation commit in local Git history.")
+    for name in ("src/language_models.py", "src/llm_filter.py"):
+        previous = subprocess.run(["git", "show", f"{commit}:{name}"], cwd=PROJECT_ROOT,
+                                  capture_output=True, text=True, encoding="utf-8")
+        if previous.returncode:
+            raise ValueError("Original generation source is unavailable; do not replay unverifiable responses.")
+        current = (PROJECT_ROOT / name).read_text(encoding="utf-8")
+        if name.endswith("language_models.py"):
+            unchanged = previous.stdout == current
+        else:
+            def prompt_parts(source):
+                return [ast.dump(node, include_attributes=False) for node in ast.parse(source).body
+                        if (isinstance(node, ast.FunctionDef) and node.name == "review_messages")
+                        or (isinstance(node, ast.Assign) and any(
+                            isinstance(target, ast.Name) and target.id == "SYSTEM_PROMPT" for target in node.targets))]
+            unchanged = prompt_parts(previous.stdout) == prompt_parts(current)
+        if not unchanged:
+            raise ValueError("Prompt or generation implementation changed; a fresh model run is required.")
+    before = Counter(p["review"]["status"] for p in hybrid["passages"])
+    for passage in hybrid["passages"]:
+        review = passage["review"]
+        if review.get("raw_response") and review["status"] in {"ok", "partial", "invalid_response"}:
+            review["original_validation_status"] = review["status"]
+            review["original_validation_errors"] = review.get("validation_errors", [])
+            review.update(parse_review(review["raw_response"], passage, run["config"]["llm"]["model"]))
+    reviews = {p["id"]: p["review"] for p in hybrid["passages"]}
+    hybrid["documents"] = merge_reviews(documents, hybrid["passages"], reviews)
+    return {"original_generation_code_sha256": run["code_sha256"],
+            "evaluated_code_sha256": code_hash(), "generation_commit": commit,
+            "generation_source_and_prompt_verified": True, "new_model_generations": 0,
+            "review_status_before": dict(before),
+            "review_status_after": dict(Counter(r["status"] for r in reviews.values()))}
 
 
 def main():
@@ -69,6 +127,8 @@ def main():
     parser.add_argument("--baseline", required=True, help="Recorded first-pass JSON.")
     parser.add_argument("--hybrid", help="Optional model output on exactly these reference passages.")
     parser.add_argument("--calibrate-routing", action="store_true")
+    parser.add_argument("--replay-validation", action="store_true",
+                        help="Revalidate recorded development responses after parser/fusion fixes, without inference.")
     parser.add_argument("--calibrated-config", help="Save a configuration with the chosen development threshold.")
     parser.add_argument("--output", required=True)
     parser.add_argument("--overwrite", action="store_true")
@@ -86,10 +146,12 @@ def main():
             raise ValueError("Evaluation and calibrated configuration require distinct paths.")
         if args.calibrate_routing and not args.hybrid:
             raise ValueError("Calibration requires --hybrid development model output.")
+        if args.replay_validation and not args.hybrid:
+            raise ValueError("Validation replay requires --hybrid development output.")
         if config_output and not args.calibrate_routing:
             raise ValueError("--calibrated-config requires --calibrate-routing.")
         reference, reference_hash = load_reference(project_path(args.reference))
-        if args.calibrate_routing and reference["split"] != "development":
+        if (args.calibrate_routing or args.replay_validation) and reference["split"] != "development":
             raise ValueError("Never calibrate on test data.")
         baseline, baseline_hash = load_first_pass(project_path(args.baseline))
         identifiers = {u["document_id"] for u in reference["units"]}
@@ -106,17 +168,31 @@ def main():
             hybrid = json.loads(hybrid_path.read_text(encoding="utf-8-sig"))
             run = hybrid["run"]
             if (run.get("input_sha256") != baseline_hash or run.get("reference_sha256") != reference_hash
-                    or run.get("code_sha256") != code_hash() or run.get("stage") != "hybrid"):
+                    or run.get("stage") != "hybrid"):
                 raise ValueError("Model output does not match the baseline, reference or executed pipeline code.")
+            if run.get("code_sha256") != code_hash() and not args.replay_validation:
+                raise ValueError("Pipeline code changed; rerun the models or explicitly verify a development validation replay.")
             expected = {u["id"] for u in reference["units"]}
             if {p["id"] for p in hybrid["passages"]} != expected or len(hybrid["passages"]) != len(expected):
                 raise ValueError("Model output must cover exactly the reference passage IDs.")
             operational = build_passages(documents, **{key: run["config"]["passages"][key]
                                                        for key in ("core_chars", "context_chars")})
             reference_passages(reference, documents, operational, run["config"]["passages"])
+            if args.replay_validation:
+                if run["scope"] != "development_all_review":
+                    raise ValueError("Replay is restricted to all-review development runs.")
+                report["validation_replay"] = replay_validation(hybrid, documents)
             report["hybrid_sha256"] = hashlib.sha256(hybrid_path.read_bytes()).hexdigest()
             mode = "all_review_development_diagnostic" if run["scope"] == "development_all_review" else "hybrid"
             report["metrics"][mode] = score_reference(reference, hybrid["documents"])
+            if run.get("compare_routing"):
+                without_ppl = routing_trial(
+                    reference, documents, hybrid["passages"],
+                    {p["id"]: p["perplexity"] for p in hybrid["passages"]},
+                    {p["id"]: p["review"] for p in hybrid["passages"]},
+                    run["config"]["routing"], use_perplexity=False)
+                report["metrics"]["without_perplexity"] = without_ppl["metrics"]
+                report["fixed_routing_comparison"] = {key: value for key, value in without_ppl.items() if key != "metrics"}
             if args.calibrate_routing:
                 if run["scope"] != "development_all_review":
                     raise ValueError("Calibration requires a --development-all run, not selectively observed responses.")
@@ -129,7 +205,9 @@ def main():
                     config["routing"]["perplexity_threshold"] = result["chosen_threshold"]
                     config["output_path"] = "outputs/10_hybrid_reference_test.json"
                     config["calibration"] = {"split": "development", "reference_sha256": reference_hash,
-                                             "evaluation_output": str(output_path), "objective": result["objective"]}
+                                             "evaluation_output": str(output_path), "objective": result["objective"],
+                                             "threshold_selection": result["threshold_selection"],
+                                             "pipeline_code_sha256": code_hash()}
                     config_output.parent.mkdir(parents=True, exist_ok=True)
                     write_result(config_output, config)
         output_path.parent.mkdir(parents=True, exist_ok=True)

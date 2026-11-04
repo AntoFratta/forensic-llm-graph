@@ -185,6 +185,8 @@ def main() -> None:
     parser.add_argument("--reference", help="Select only the operational cores of a reviewed reference.")
     parser.add_argument("--development-all", action="store_true",
                         help="Review every development reference core for offline routing calibration.")
+    parser.add_argument("--compare-routing", action="store_true",
+                        help="Review the union of fixed with/without-perplexity selections on a reference.")
     stage = parser.add_mutually_exclusive_group()
     stage.add_argument("--prepare-only", action="store_true", help="Build passages without model dependencies.")
     stage.add_argument("--score-only", action="store_true", help="Calculate perplexity without loading Qwen.")
@@ -205,6 +207,8 @@ def main() -> None:
             raise ValueError("Choose either a reference subset or an automatic smoke sample.")
         if args.development_all and (reference is None or reference["split"] != "development"):
             raise ValueError("--development-all requires a reviewed development reference, never test data.")
+        if args.compare_routing and (reference is None or args.development_all or args.score_only or args.smoke_test):
+            raise ValueError("--compare-routing requires a fixed-threshold reference run.")
         if not (args.smoke_test or args.prepare_only or args.score_only or args.development_all):
             select_passages([], {}, config["routing"])
         input_path, output_path = project_path(config["input_path"]), project_path(config["output_path"])
@@ -251,6 +255,7 @@ def main() -> None:
         # Bind recovery to model versions, input bytes, source code and passage scope.
         identity = {"input": input_hash, "code": run["code_sha256"], "config": config,
                     "scope": scope, "score_only": args.score_only,
+                    "compare_routing": args.compare_routing,
                     "reference": reference_hash,
                     "libraries": environment_versions(),
                     "passages": [p["id"] for p in passages]}
@@ -290,8 +295,11 @@ def main() -> None:
                     release_cuda_memory()
             routing = (None if args.score_only or args.development_all else
                        select_passages(passages, scores, config["routing"], args.smoke_test))
+            without_ppl = (select_passages(passages, scores, config["routing"], use_perplexity=False)
+                           if args.compare_routing else None)
             selected = (passages if args.development_all and not args.score_only else
-                        [] if routing is None else [p for p in passages if routing["decisions"][p["id"]]["selected"]])
+                        [] if routing is None else [p for p in passages if routing["decisions"][p["id"]]["selected"]
+                                                  or (without_ppl and without_ppl["decisions"][p["id"]]["selected"])])
             remaining = [p for p in selected if p["id"] not in reviews]
             if remaining:
                 print(f"Minerva released. Loading Qwen; {len(remaining)} passages to review...", flush=True)
@@ -309,22 +317,32 @@ def main() -> None:
                     del model, tokenizer
                     release_cuda_memory()
 
-        merged = merge_reviews(documents, passages, reviews)
+        primary_reviews = ({key: review for key, review in reviews.items() if routing["decisions"][key]["selected"]}
+                           if routing else reviews)
+        merged = merge_reviews(documents, passages, primary_reviews)
         run.update({"stage": "perplexity_only" if args.score_only else "hybrid",
                     "models": models, "invocation_seconds": time.perf_counter() - started,
                     "peak_host_memory_bytes": peak_host_memory(),
                     "reviewed_passage_count": len(reviews),
+                    "primary_selected_passage_count": len(primary_reviews),
+                    "compare_routing": args.compare_routing,
+                    "primary_generation_seconds": sum(r.get("inference_seconds", 0) for r in primary_reviews.values()),
+                    "comparison_extra_generation_seconds": sum(r.get("inference_seconds", 0)
+                                                               for key, r in reviews.items() if key not in primary_reviews),
                     "review_status_counts": dict(Counter(r["status"] for r in reviews.values())),
                     "generation_attempt_count": sum(r.get("attempt_count", 1) for r in reviews.values()),
-                    "merge_policy": "preserve_unflagged_structured_rules; complete_replace_other; partial_add_only",
+                    "merge_policy": "preserve_unflagged_first_pass; complete_replace_flagged; partial_add_only",
                     "perplexity_status_counts": dict(Counter(s["status"] for s in scores.values())),
                     "by_source": summarize_sources(merged),
                     "candidate_count": sum(len(d["entities"]) for d in merged)})
         detailed = [{**passage, "perplexity": scores[passage["id"]],
                      "routing": routing["decisions"][passage["id"]] if routing else None,
+                     "routing_without_perplexity": without_ppl["decisions"][passage["id"]] if without_ppl else None,
                      "review": reviews.get(passage["id"])} for passage in passages]
         routing_summary = {key: value for key, value in routing.items() if key != "decisions"} if routing else None
         write_result(output_path, {"run": run, "routing": routing_summary,
+                                   "routing_without_perplexity": {key: value for key, value in without_ppl.items()
+                                                                   if key != "decisions"} if without_ppl else None,
                                    "passages": detailed, "documents": merged})
         print(f"Saved {output_path}", flush=True)
     except (OSError, ValueError, RuntimeError, ImportError, KeyError) as exc:

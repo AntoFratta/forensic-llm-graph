@@ -217,23 +217,22 @@ platform-dependent input hashes caused by serialization alone.
 
 Open `notebooks/second_pass_colab.ipynb` from GitHub in a T4 runtime. Install the
 shared requirements, enable the `HF_TOKEN` Secret and upload the saved run 05
-plus `development_reference.reviewed.json` from the local ignored research folder.
+plus `test_reference.reviewed.json` from the local ignored research folder after both test review batches are confirmed.
 Reviewed data and source texts are not committed to this repository.
 
-The current stage uses 12 human-reviewed development extracts, three per source.
+Development used 12 human-reviewed extracts, three per source. The current stage fixes the method and evaluates 12 separately reviewed test extracts.
 The complete working corpus is unchanged. Development and test use separate
-source groups; held-out selection still requires the documented grouping checks.
+source groups; the test selection is fixed before annotation, with three judicial windows from one held-out PDF/case.
 The reduced manual reference contains 24 extracts overall. It is exploratory,
 not a population-representative sample of Italian forensic language.
 
 ```bash
-python scripts/run_hybrid.py --input /content/05_batched_form_boundaries_spacy_lg.json --reference /content/development_reference.reviewed.json --development-all
+python scripts/run_hybrid.py --input /content/05_batched_form_boundaries_spacy_lg.json --reference /content/test_reference.reviewed.json --compare-routing
 ```
 
 Minerva-350M scores original text without prompts. It is released before Qwen3-8B
 loads with NF4 weights and FP16 computation. Both revisions are pinned in
-`configs/hybrid.json`. Thinking is disabled. Qwen reviews all development windows
-once, so routing alternatives can reuse these responses without new generation.
+`configs/hybrid.json`. Thinking is disabled. The final test reviews the union of fixed with/without-perplexity selections, generating each window once. Primary output merges only the with-perplexity selection.
 No training or fine-tuning is performed. `--development-all` refuses test data.
 
 Operational passages now use 800-character cores and 160 characters of context,
@@ -248,10 +247,10 @@ optional alignment metadata with a flag. Validation checks schema, grounding,
 formats and clear type conflicts. An explicit fiscal/VAT field may support a
 malformed value, retained with `format_valid=false` and a review reason. Short
 phone numbers are supported. These checks do not establish semantic correctness.
-One validation retry is allowed; all attempts and their token/time costs are saved.
+Exact quotation alignment also tolerates whitespace-only differences while retaining original mention offsets. One validation retry is allowed; all attempts and their token/time costs are saved.
 
 Complete responses replace other first-pass candidates in reviewed cores while
-preserving unflagged structured rule mentions on omission. Partial responses add
+preserving all unflagged first-pass mentions on omission. Partial responses add
 validated candidates without deleting originals. Failed responses retain the
 first pass. This fusion policy is explicit and evaluated, not calibrated confidence.
 The recorded first-pass file is never changed by the second pass.
@@ -265,8 +264,7 @@ produce false positives and false negatives. Every occurrence is scored, includi
 repeated names and temporal references. Results separate REDIT forms, news and judicial texts from generated synthetic
 text, report per-category support, and use null for undefined metrics.
 
-Routing calibration compares three development perplexity quantiles and a
-threshold above the observed maximum. It selects micro F1 on REDIT, DICE and ArchivioAntimafia, breaking
+Routing calibration compares three development quantiles, the configured diagnostic percentile and a threshold above the observed maximum. If development F1 does not vary across trials, the configured percentile is a fixed fallback rather than a measured quality optimum. It selects micro F1 on REDIT, DICE and ArchivioAntimafia, breaking
 ties by fewer reviews and the higher threshold. The saved configuration keeps the
 chosen threshold fixed for subsequent evaluation. The review budget is identical
 across trials. The flags-only comparison removes both perplexity eligibility and
@@ -289,3 +287,23 @@ results automatically or mount Drive.
 Original REDIT annotations remain separate. Their labels and boundaries require
 an explicit mapping before an additional source-reference benchmark. Synthetic
 source labels are diagnostics and are not automatically treated as reviewed gold.
+
+## Finalization and recorded-response replay
+
+Run 09 development selected the same three windows for all tried thresholds.
+The final threshold is its fixed 80th percentile, 42.77412162359235. This is not
+evidence of a perplexity benefit. Report the held-out with/without comparison
+even if its outcomes are equal. The absolute corpus cap is 100 windows; on the
+12-window reference this and the original 500 cap both allow three reviews.
+
+`scripts/evaluate.py --replay-validation` revalidates saved development responses
+after parser/fusion changes. It verifies the original Git generation source and
+prompt, records original/evaluated fingerprints and adds no model generations.
+It refuses test references and changed generation implementations. Raw run files
+remain unchanged. Replays are distinguished from fresh model runs in reports.
+
+The notebook's last section is disabled by default. After inspecting the final
+test, it can run the complete corpus in the same runtime, reusing downloaded
+weights. Minerva scores all passages; Qwen reviews at most 100 prioritized windows.
+Its separate reference report measures the actual global routing outcome on the
+checked test cores. Save all generated results manually before disconnecting.

@@ -1,6 +1,6 @@
 {
   "input_path": "outputs/05_batched_form_boundaries_spacy_lg.json",
-  "output_path": "outputs/09_development_models.json",
+  "output_path": "outputs/10_final_test_models.json",
   "passages": {
     "core_chars": 800,
     "context_chars": 160,
@@ -14,10 +14,10 @@
     "batch_size": 4
   },
   "routing": {
-    "perplexity_threshold": null,
+    "perplexity_threshold": 42.77412162359235,
     "diagnostic_percentile": 0.8,
     "max_review_fraction": 0.2,
-    "max_review_passages": 500
+    "max_review_passages": 100
   },
   "llm": {
     "model": "Qwen/Qwen3-8B",
@@ -27,5 +27,14 @@
     "validation_retries": 1,
     "quantization": "nf4",
     "enable_thinking": false
+  },
+  "calibration": {
+    "split": "development",
+    "reference_sha256": "9c95eaf78eb04e25ef9e8abd95f9df99bcceb1d016e5dc9a393fc3d73136ab43",
+    "evaluation_output": "research/evaluation/09_replayed_evaluation.json",
+    "objective": "micro F1 on REDIT, DICE and ArchivioAntimafia; ties: fewer reviews, higher threshold",
+    "threshold_selection": "fixed_development_percentile_fallback; no measured F1 preference",
+    "pipeline_code_sha256": "ff6db752bfb62265a56982b217c2a33755d81e67b72d854b98f55dd6ec53de4e",
+    "resource_limit_note": "The absolute full-corpus cap is 100 rather than the provisional 500, to limit T4 generation time. Both caps give the same three-passage budget on the 12-unit reference."
   }
 }

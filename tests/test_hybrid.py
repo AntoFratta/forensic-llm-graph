@@ -95,6 +95,28 @@ class ReviewTests(unittest.TestCase):
         entity = self.parse([{"text": "Elena", "label": "PERSON", "context": "Elena altrove"}])[0]
         self.assertIn("context_resolved_from_unique_match", entity["review_reasons"])
 
+    def test_context_can_align_pdf_whitespace_without_changing_the_mention(self):
+        text = "Anna  risponde\nqui. Anna risponde altrove."
+        passage = {"start": 0, "core_start": 0, "core_end": len(text), "text": text}
+        review = parse_review(json.dumps({"entities": [
+            {"text": "Anna", "label": "PERSON", "context": "Anna risponde qui."}]}), passage, "test-model")
+        self.assertEqual(review["status"], "ok")
+        self.assertEqual(review["entities"][0]["start"], 0)
+        self.assertIn("context_whitespace_aligned", review["entities"][0]["review_reasons"])
+        invented = parse_review(json.dumps({"entities": [
+            {"text": "Anna", "label": "PERSON", "context": "Anna risponde ovunque."}]}), passage, "test-model")
+        self.assertEqual(invented["status"], "invalid_response")
+
+    def test_empty_llm_response_does_not_erase_unflagged_person_evidence(self):
+        text = "Elena risponde."
+        entity = {"start": 0, "end": 5, "text": "Elena", "label": "PERSON", "source": "spacy:ner",
+                  "needs_review": False, "review_reasons": [], "format_valid": None, "subtype": None}
+        document = {"id": "one", "text": text, "entities": [entity]}
+        passage = {"id": "one@0", "document_id": "one", "core_start": 0, "core_end": len(text)}
+        result = merge_reviews([document], [passage], {"one@0": {"status": "ok", "entities": []}})
+        self.assertEqual(result[0]["entities"][0]["text"], "Elena")
+        self.assertEqual(result[0]["entities"][0]["retained_by"], "unflagged_first_pass")
+
     def test_unique_match_resolves_an_incorrect_index_with_a_recorded_flag(self):
         self.passage["text"] = "Elena vive qui."
         entity = self.parse([{"text": "Elena", "label": "PERSON", "occurrence": 2}])[0]

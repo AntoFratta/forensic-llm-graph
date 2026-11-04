@@ -8,7 +8,6 @@ from src.deterministic import structured_format_valid
 
 LABELS = {"PERSON", "COMPANY", "ROLE", "LOCATION", "EMAIL", "PHONE",
           "TAX_CODE", "VAT_NUMBER", "BANK_ACCOUNT", "TIME"}
-STRUCTURED_LABELS = {"EMAIL", "PHONE", "TAX_CODE", "VAT_NUMBER", "BANK_ACCOUNT", "TIME"}
 _HONORIFIC = re.compile(r"^(?:sig(?:nor[ae]?)?|dott(?:or[ae]?|oressa)?|avv(?:ocato|ocatessa)?)\.?\s+", re.I)
 _MONEY = re.compile(r"(?:[€$£]|\b(?:EUR|euro)\b).*\d|\d.*(?:[€$£]|\b(?:EUR|euro)\b)", re.I | re.S)
 _STREET_PREFIX = re.compile(r"^(?:via|viale|vicolo|piazza|corso|largo|strada)\b", re.I)
@@ -109,6 +108,16 @@ def _resolve_mention(item: dict, passage: dict) -> tuple[int, int, list]:
         for outer in re.finditer(re.escape(context), passage["text"]):
             for inner in re.finditer(re.escape(value), context):
                 matches.add(outer.start() + inner.start())
+        if not matches:
+            # Model quotations may flatten PDF line breaks. Only whitespace can
+            # differ; the mention itself must still occur literally in the source.
+            parts = re.split(r"(\s+)", context.strip())
+            pattern = "".join(r"\s+" if part.isspace() else re.escape(part) for part in parts)
+            for outer in re.finditer(pattern, passage["text"]):
+                for inner in re.finditer(re.escape(value), outer.group()):
+                    matches.add(outer.start() + inner.start())
+            if matches:
+                reasons.append("context_whitespace_aligned")
     if len(matches) == 1:
         position = next(iter(matches))
     elif len(positions) == 1:
@@ -232,14 +241,13 @@ def parse_entities(response: str, passage: dict, model_name: str) -> list:
     return review["entities"]
 
 
-def _protected_rule(entity: dict) -> bool:
-    """Preserve unflagged structured rules when the LLM simply omits them.
+def _protected_first_pass(entity: dict) -> bool:
+    """Preserve unflagged first-pass evidence when the LLM simply omits it.
 
     This is an explicit fusion policy, not a claim of calibrated confidence.
     Conflicting LLM labels are retained and flagged rather than silently winning.
     """
-    return (entity["label"] in STRUCTURED_LABELS and not entity["needs_review"]
-            and any(source.startswith("rule:") for source in entity["source"].split(";")))
+    return not entity["needs_review"]
 
 
 def _join_postal_addresses(text: str, entities: list) -> list:
@@ -285,7 +293,7 @@ def _join_postal_addresses(text: str, entities: list) -> list:
 def merge_reviews(documents: list, passages: list, reviews: dict) -> list:
     """Use complete reviews for replacement and partial reviews for additions.
 
-    Unflagged structured rules survive an LLM omission. Failed and unselected
+    Unflagged first-pass candidates survive an LLM omission. Failed and unselected
     cores retain all original candidates. Exact duplicates are merged; conflicts
     and review provenance remain visible. Input dictionaries are never modified.
     """
@@ -301,10 +309,10 @@ def merge_reviews(documents: list, passages: list, reviews: dict) -> list:
         candidates = {}
         for entity in document["entities"]:
             replaceable = any(p["core_start"] <= entity["start"] < p["core_end"] for p, _ in complete)
-            if not replaceable or _protected_rule(entity):
+            if not replaceable or _protected_first_pass(entity):
                 candidate = {**entity, "review_reasons": list(entity["review_reasons"])}
                 if replaceable:
-                    candidate["retained_by"] = "unflagged_structured_rule"
+                    candidate["retained_by"] = "unflagged_first_pass"
                 candidates[(entity["start"], entity["end"], entity["label"])] = candidate
         original = {(e["start"], e["end"], e["label"]): e for e in document["entities"]}
         for passage, review in applied:
