@@ -78,16 +78,18 @@ def smoke_sample(passages: list, per_source: int, seed: int) -> list:
 
 
 def select_passages(passages: list, scores: dict, settings: dict,
-                    smoke_test: bool = False) -> dict:
+                    smoke_test: bool = False, use_perplexity: bool = True) -> dict:
     """Combine heuristic review signals and perplexity under an explicit budget.
 
     A fixed threshold is required for an extended run. The sample percentile is
     allowed only for the technical smoke test and must not become a test-set
     calibration. Review priorities are heuristic, not calibrated confidence.
     """
-    threshold = settings["perplexity_threshold"]
-    threshold_mode = "fixed"
-    if threshold is None:
+    threshold = settings["perplexity_threshold"] if use_perplexity else None
+    threshold_mode = "fixed" if use_perplexity else "disabled"
+    if not use_perplexity:
+        pass
+    elif threshold is None:
         if not smoke_test:
             raise ValueError("Set a development-calibrated perplexity_threshold before an extended run.")
         values = sorted(score["perplexity"] for score in scores.values()
@@ -124,17 +126,18 @@ def select_passages(passages: list, scores: dict, settings: dict,
         if not passage["candidates"] and sum(char.isalpha() for char in passage["text"]) >= 80:
             reasons.append("possible_omission")
             priority += 1
-        if score["status"] != "ok":
+        if use_perplexity and score["status"] != "ok":
             reasons.append("perplexity_unavailable")
             priority += 1
-        elif threshold is not None and score["perplexity"] >= threshold:
+        elif use_perplexity and threshold is not None and score["perplexity"] >= threshold:
             reasons.append("high_perplexity")
             priority += 2
         decisions[passage["id"]] = {"eligible": bool(reasons), "selected": False,
                                      "reasons": reasons, "priority": priority}
     eligible = [p for p in passages if decisions[p["id"]]["eligible"]]
     eligible.sort(key=lambda p: (-decisions[p["id"]]["priority"],
-                                 -(scores[p["id"]].get("mean_nll") or 0), p["id"]))
+                                 -(scores[p["id"]].get("mean_nll") or 0) if use_perplexity else 0,
+                                 p["id"]))
     budget = min(maximum, math.ceil(len(passages) * fraction))
     for passage in eligible[:budget]:
         decisions[passage["id"]]["selected"] = True

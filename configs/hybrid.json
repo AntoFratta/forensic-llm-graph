@@ -1,9 +1,9 @@
 {
   "input_path": "outputs/05_batched_form_boundaries_spacy_lg.json",
-  "output_path": "outputs/08_hybrid_robustness.json",
+  "output_path": "outputs/09_development_models.json",
   "passages": {
-    "core_chars": 1200,
-    "context_chars": 200,
+    "core_chars": 800,
+    "context_chars": 160,
     "smoke_per_source": 4,
     "seed": 42
   },

@@ -213,88 +213,79 @@ the synthetic diagnostics. Progress is printed every 100 documents.
 Generated JSON files use LF line endings on both Windows and Colab to avoid
 platform-dependent input hashes caused by serialization alone.
 
-## Second pass
+## Second pass and reference evaluation
 
-Install the shared `requirements.txt` in a T4 Colab runtime. It includes both
-stages and reuses the installed CUDA PyTorch when compatible. Minerva's gated
-repository requires acceptance on Hugging Face; provide a permitted read token
-through the Colab Secret named `HF_TOKEN`, not a notebook cell or Git file.
+Open `notebooks/second_pass_colab.ipynb` from GitHub in a T4 runtime. Install the
+shared requirements, enable the `HF_TOKEN` Secret and upload the saved run 05
+plus `development_reference.reviewed.json` from the local ignored research folder.
+Reviewed data and source texts are not committed to this repository.
 
-Open `notebooks/second_pass_colab.ipynb` from GitHub and upload the saved run 05
-JSON through the Colab file panel. The notebook reuses its complete texts and
-candidates rather than downloading raw data and rerunning spaCy. The current
-robustness test selects four passages per source automatically, sixteen in total:
-
-```bash
-python scripts/run_hybrid.py --input /content/05_batched_form_boundaries_spacy_lg.json --smoke-test
-```
-
-`configs/hybrid.json` pins both model revisions. Minerva-350M scores original
-passage text, excluding padding. It is released before Qwen3-8B loads with NF4
-weights and FP16 computation. Qwen's thinking mode is disabled. Model loading,
-GPU memory, Linux peak process RAM, token counts and generation times are saved.
-No training or fine-tuning is performed.
-
-Passages have disjoint 1,200-character cores and 200 characters of surrounding
-context. A final remainder shorter than one quarter of the core size is absorbed
-into its preceding core. The code preserves every character and assigns entities by their start
-offset. Qwen returns exact strings with short exact context quotations; Python
-resolves original offsets without asking the model to count occurrences. The
-earlier index format remains readable for archived results. A unique literal
-mention can resolve incorrect optional alignment metadata with an explicit flag.
-Ambiguous repeated strings are never assigned a position by guessing.
-
-Validation checks the JSON envelope, each individual item, structured formats,
-word boundaries and clear type conflicts such as currency amounts labelled TIME.
-It does not prove semantic correctness. Fiscal-code shape checks accept both
-the 16-character form and 11-digit numeric codes; they do not distinguish an
-11-digit fiscal code from a VAT number without context or validate checksums.
-At most one additional generation receives validation feedback. Every attempt,
-its errors and its token/time cost are recorded. The prompt examples are invented
-to illustrate general conventions and do not contain corpus annotations.
-
-Complete valid responses replace other first-pass predictions in reviewed cores,
-while unflagged structured rule mentions survive an LLM omission. This is an
-explicit fusion policy, not a calibrated confidence guarantee. Partial responses
-can contribute validated additions but cannot authorize deletion of original
-candidates. Invalid or truncated responses retain the original candidates.
-Conflicts remain flagged. A complete LLM street-address span may absorb adjacent
-postal components, preserving the source spelling and absorbed evidence.
-Original first-pass files stay intact.
-First-pass candidates select and prioritize passages but are not shown in the
-Qwen prompt. Qwen extracts independently from the source text to reduce copying
-of initial errors. The initial smoke test loaded both models successfully on a
-T4, with seven syntactically valid responses out of eight; semantic omissions
-remain and require separate evaluation.
-
-The current smoke test sends all sixteen sampled passages to Qwen to test execution across
-collections. It also records what the diagnostic routing policy would select;
-it is not a quality evaluation or a selective-processing benchmark. Only the
-represented documents appear in this output, with their complete original text
-and the remaining first-pass candidates. It does not claim the full corpus has
-received LLM review.
-
-The runner can prepare passages offline, without model dependencies:
+The current stage uses 12 human-reviewed development extracts, three per source.
+The complete working corpus is unchanged. Development and test use separate
+source groups; held-out selection still requires the documented grouping checks.
+The reduced manual reference contains 24 extracts overall. It is exploratory,
+not a population-representative sample of Italian forensic language.
 
 ```bash
-python scripts/run_hybrid.py --prepare-only --smoke-test --output outputs/hybrid_preview.json
+python scripts/run_hybrid.py --input /content/05_batched_form_boundaries_spacy_lg.json --reference /content/development_reference.reviewed.json --development-all
 ```
 
-For later development analysis, `--score-only` calculates perplexity without
-loading Qwen. An extended review requires a fixed `perplexity_threshold` chosen
-on development data. The sample's diagnostic 80th percentile is available only
-in smoke mode. Routing combines review signals, possible omissions and high
-perplexity, capped by an explicit fraction and passage budget. Current limits
-are provisional engineering settings, not validated confidence thresholds.
+Minerva-350M scores original text without prompts. It is released before Qwen3-8B
+loads with NF4 weights and FP16 computation. Both revisions are pinned in
+`configs/hybrid.json`. Thinking is disabled. Qwen reviews all development windows
+once, so routing alternatives can reuse these responses without new generation.
+No training or fine-tuning is performed. `--development-all` refuses test data.
 
-Completed scores and responses are flushed to a companion `.checkpoints.jsonl`
-file. If a cell is interrupted, rerun the same command with `--resume`. Recovery
-requires matching input bytes, code, model settings, scope and inference-library
-versions. An existing final result is protected; choose a new output or use
-`--overwrite` intentionally. Save the checkpoint manually before deleting the
-runtime if recovery in another session is needed. No automatic download cell
-is included.
+Operational passages now use 800-character cores and 160 characters of context,
+matching the reference partition. The previous smoke tests used larger windows.
+Short final remainders are absorbed. Text and offsets remain unchanged; the core
+containing a mention's start owns it. Existing candidates can extend the context
+to preserve a complete mention. Reference labels never enter the prompt or routing.
 
-The broader account-context rules (`sul conto`, `numero di conto`, `conto postale`)
-take effect in newly generated first-pass runs. Reusing run 05 deliberately
-preserves that run's original predictions for this model-loading check.
+Qwen returns exact mention strings and short exact context quotations. Ambiguous
+repeated strings are not located by guessing. A unique literal can recover bad
+optional alignment metadata with a flag. Validation checks schema, grounding,
+formats and clear type conflicts. An explicit fiscal/VAT field may support a
+malformed value, retained with `format_valid=false` and a review reason. Short
+phone numbers are supported. These checks do not establish semantic correctness.
+One validation retry is allowed; all attempts and their token/time costs are saved.
+
+Complete responses replace other first-pass candidates in reviewed cores while
+preserving unflagged structured rule mentions on omission. Partial responses add
+validated candidates without deleting originals. Failed responses retain the
+first pass. This fusion policy is explicit and evaluated, not calibrated confidence.
+The recorded first-pass file is never changed by the second pass.
+
+```bash
+python scripts/evaluate.py --reference /content/development_reference.reviewed.json --baseline /content/05_batched_form_boundaries_spacy_lg.json --hybrid outputs/09_development_models.json --calibrate-routing --calibrated-config outputs/09_calibrated_hybrid.json --output outputs/09_development_evaluation.json
+```
+
+Evaluation counts exact `(start, end, label)` matches. Boundary and category errors
+produce false positives and false negatives. Every occurrence is scored, including
+repeated names and temporal references. Results separate REDIT forms, news and judicial texts from generated synthetic
+text, report per-category support, and use null for undefined metrics.
+
+Routing calibration compares three development perplexity quantiles and a
+threshold above the observed maximum. It selects micro F1 on REDIT, DICE and ArchivioAntimafia, breaking
+ties by fewer reviews and the higher threshold. The saved configuration keeps the
+chosen threshold fixed for subsequent evaluation. The review budget is identical
+across trials. The flags-only comparison removes both perplexity eligibility and
+perplexity tie-breaking. The all-review result is a development diagnostic.
+Budget comparisons operate on the annotated reference subset; full-corpus routing
+may select a different proportion because its distribution and absolute cap differ.
+
+`--prepare-only` validates inputs and builds windows without model dependencies.
+`--score-only` omits Qwen. The earlier `--smoke-test` mode remains available for
+technical checks, but it is not a final quality evaluation. A normal selective run
+requires a fixed threshold. Calibration refuses test references; test evaluation
+requires an explicitly frozen selection and reviewed annotations.
+
+Scores and reviews are flushed to a companion `.checkpoints.jsonl`. `--resume`
+requires identical input, reference, code, configuration, scope and library versions.
+An existing result is protected; use a new name or intentionally use `--overwrite`.
+Save outputs manually before disconnecting Colab. The notebook does not download
+results automatically or mount Drive.
+
+Original REDIT annotations remain separate. Their labels and boundaries require
+an explicit mapping before an additional source-reference benchmark. Synthetic
+source labels are diagnostics and are not automatically treated as reviewed gold.

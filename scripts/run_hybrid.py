@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.run_pipeline import git_info, project_path, summarize_sources
+from src.evaluation import load_reference, reference_passages
 from src.language_models import (load_model, perplexity_batches, release_cuda_memory,
                                  require_cuda, review_passage)
 from src.llm_filter import LABELS, merge_reviews
@@ -98,7 +99,8 @@ def code_hash() -> str:
     """Identify executed source files, including uncommitted local edits."""
     digest = hashlib.sha256()
     for name in ("scripts/run_hybrid.py", "scripts/run_pipeline.py", "src/passages.py",
-                 "src/llm_filter.py", "src/language_models.py"):
+                 "src/llm_filter.py", "src/language_models.py", "src/deterministic.py",
+                 "src/evaluation.py"):
         digest.update(name.encode("utf-8"))
         # Git may check out CRLF on Windows; line-ending conversion is not a code change.
         digest.update((PROJECT_ROOT / name).read_bytes().replace(b"\r\n", b"\n"))
@@ -180,6 +182,9 @@ def main() -> None:
     parser.add_argument("--input", help="First-pass JSON; no raw-data download is required.")
     parser.add_argument("--output", help="New result JSON; checkpoint path is derived from it.")
     parser.add_argument("--smoke-test", action="store_true", help="Test a few passages per collection.")
+    parser.add_argument("--reference", help="Select only the operational cores of a reviewed reference.")
+    parser.add_argument("--development-all", action="store_true",
+                        help="Review every development reference core for offline routing calibration.")
     stage = parser.add_mutually_exclusive_group()
     stage.add_argument("--prepare-only", action="store_true", help="Build passages without model dependencies.")
     stage.add_argument("--score-only", action="store_true", help="Calculate perplexity without loading Qwen.")
@@ -195,11 +200,19 @@ def main() -> None:
         if args.output:
             config["output_path"] = args.output
         validate_config(config)
-        if not (args.smoke_test or args.prepare_only or args.score_only):
+        reference, reference_hash = load_reference(project_path(args.reference)) if args.reference else (None, None)
+        if args.smoke_test and reference:
+            raise ValueError("Choose either a reference subset or an automatic smoke sample.")
+        if args.development_all and (reference is None or reference["split"] != "development"):
+            raise ValueError("--development-all requires a reviewed development reference, never test data.")
+        if not (args.smoke_test or args.prepare_only or args.score_only or args.development_all):
             select_passages([], {}, config["routing"])
         input_path, output_path = project_path(config["input_path"]), project_path(config["output_path"])
         checkpoint_path = output_path.with_suffix(".checkpoints.jsonl")
-        if output_path in {input_path, config_path} or output_path.suffix.lower() != ".json":
+        protected = {input_path, config_path}
+        if args.reference:
+            protected.add(project_path(args.reference))
+        if output_path in protected or output_path.suffix.lower() != ".json":
             raise ValueError("Choose a JSON output distinct from input and configuration.")
         if output_path.exists() and not args.overwrite:
             raise FileExistsError("Output exists. Choose a new name or use --overwrite.")
@@ -207,17 +220,24 @@ def main() -> None:
         documents = source["documents"]
         passages = build_passages(documents, config["passages"]["core_chars"], config["passages"]["context_chars"])
         full_passage_count = len(passages)
+        if reference:
+            passages = reference_passages(reference, documents, passages, config["passages"])
+            identifiers = {p["document_id"] for p in passages}
+            documents = [document for document in documents if document["id"] in identifiers]
         if args.smoke_test:
             passages = smoke_sample(passages, config["passages"]["smoke_per_source"], config["passages"]["seed"])
             identifiers = {p["document_id"] for p in passages}
             documents = [document for document in documents if document["id"] in identifiers]
-        scope = "smoke_test" if args.smoke_test else "extended"
+        scope = ("development_all_review" if args.development_all else
+                 "reference_" + reference["split"] if reference else
+                 "smoke_test" if args.smoke_test else "extended")
         print(f"Scope: {scope}; {len(passages)}/{full_passage_count} passages; "
               f"{len(documents)}/{len(source['documents'])} documents represented.", flush=True)
         run = {"stage": "hybrid_preparation" if args.prepare_only else "hybrid",
                "scope": scope, "created_utc": datetime.now(timezone.utc).isoformat(),
                "config": config, "input_sha256": input_hash, "input_run": source["run"],
                "code_sha256": code_hash(), "git": git_info(),
+               "reference_sha256": reference_hash,
                "input_document_count": len(source["documents"]), "document_count": len(documents),
                "full_passage_count": full_passage_count, "passage_count": len(passages),
                "passages_by_source": dict(Counter(p["source"] for p in passages)),
@@ -231,6 +251,7 @@ def main() -> None:
         # Bind recovery to model versions, input bytes, source code and passage scope.
         identity = {"input": input_hash, "code": run["code_sha256"], "config": config,
                     "scope": scope, "score_only": args.score_only,
+                    "reference": reference_hash,
                     "libraries": environment_versions(),
                     "passages": [p["id"] for p in passages]}
         fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode("utf-8")).hexdigest()
@@ -267,8 +288,10 @@ def main() -> None:
                 finally:
                     del model, tokenizer
                     release_cuda_memory()
-            routing = None if args.score_only else select_passages(passages, scores, config["routing"], args.smoke_test)
-            selected = [] if routing is None else [p for p in passages if routing["decisions"][p["id"]]["selected"]]
+            routing = (None if args.score_only or args.development_all else
+                       select_passages(passages, scores, config["routing"], args.smoke_test))
+            selected = (passages if args.development_all and not args.score_only else
+                        [] if routing is None else [p for p in passages if routing["decisions"][p["id"]]["selected"]])
             remaining = [p for p in selected if p["id"] not in reviews]
             if remaining:
                 print(f"Minerva released. Loading Qwen; {len(remaining)} passages to review...", flush=True)

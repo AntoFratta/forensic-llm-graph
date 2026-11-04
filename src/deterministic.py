@@ -195,7 +195,7 @@ def structured_format_valid(value: str, label: str) -> bool | None:
     if label == "VAT_NUMBER":
         return bool(re.fullmatch(r"[\d .]+", value)) and len(re.sub(r"\D", "", value)) == 11
     if label == "PHONE":
-        return bool(re.fullmatch(r"\+?[\d\s/().-]+", value)) and 6 <= len(re.sub(r"\D", "", value)) <= 15
+        return bool(re.fullmatch(r"\+?[\d\s/().-]+", value)) and 3 <= len(re.sub(r"\D", "", value)) <= 15
     if label == "BANK_ACCOUNT":
         return bool(_ITALIAN_IBAN.fullmatch(value) or _COMPACT_IBAN.fullmatch(compact)
                     or re.fullmatch(r"\d(?:[ /-]?\d){3,19}", value))

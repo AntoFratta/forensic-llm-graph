@@ -2,6 +2,7 @@
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -10,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from scripts.run_hybrid import main, read_checkpoint
+from scripts.evaluate import main as evaluate_main
 
 
 class HybridRunnerTests(unittest.TestCase):
@@ -76,6 +78,54 @@ class HybridRunnerTests(unittest.TestCase):
         with patch("scripts.run_hybrid.load_model") as loader, self.assertRaises(SystemExit):
             self.execute()
         loader.assert_not_called()
+
+    def test_development_reference_selects_cores_without_sending_gold_to_review(self):
+        text = "Un testo italiano per la prova."
+        unit = {"id": f"one@0:{len(text)}", "reference_id": "D001", "document_id": "one",
+                "source": "example", "split": "development", "start": 0, "end": len(text),
+                "core_start": 0, "core_end": len(text), "text": text,
+                "text_sha256": hashlib.sha256(text.encode()).hexdigest(), "issues": [],
+                "annotation_status": "reviewed", "human_review": {"reviewer": "test human"},
+                "entities": [{"start": 3, "end": 8, "text": "testo", "label": "PERSON"}]}
+        reference = {"schema_version": 1, "split": "development", "units": [unit],
+                     "core_chars": self.config["passages"]["core_chars"],
+                     "context_chars": self.config["passages"]["context_chars"]}
+        path = self.directory / "reference.json"
+        path.write_text(json.dumps(reference), encoding="utf-8")
+        cuda = SimpleNamespace(cuda=SimpleNamespace(
+            get_device_properties=lambda index: SimpleNamespace(total_memory=16_000_000_000),
+            get_device_name=lambda index: "test GPU", max_memory_allocated=lambda: 1234))
+
+        def review(passage, settings, model, tokenizer):
+            self.assertEqual(passage["candidates"], [])
+            self.assertNotIn("entities", passage)
+            self.assertNotIn("human_review", passage)
+            return {"status": "ok", "entities": []}
+
+        with patch("scripts.run_hybrid.require_cuda", return_value=cuda), \
+                patch("scripts.run_hybrid.load_model", return_value=(object(), object(), {})), \
+                patch("scripts.run_hybrid.release_cuda_memory"), \
+                patch("scripts.run_hybrid.perplexity_batches", return_value=[{
+                    unit["id"]: {"status": "ok", "perplexity": 20.0, "mean_nll": 3.0}}]), \
+                patch("scripts.run_hybrid.review_passage", side_effect=review):
+            self.execute("--reference", str(path), "--development-all")
+        result = json.loads(self.output_path.read_text(encoding="utf-8"))
+        self.assertEqual(result["run"]["scope"], "development_all_review")
+        self.assertEqual(result["run"]["reviewed_passage_count"], 1)
+        self.assertIsNone(result["routing"])
+        self.assertEqual(result["documents"][0]["entities"], [])
+        metrics_path = self.directory / "metrics.json"
+        calibrated_path = self.directory / "calibrated.json"
+        with patch("sys.argv", ["evaluate.py", "--reference", str(path),
+                                 "--baseline", str(self.input_path), "--hybrid", str(self.output_path),
+                                 "--calibrate-routing", "--calibrated-config", str(calibrated_path),
+                                 "--output", str(metrics_path)]), redirect_stdout(io.StringIO()):
+            evaluate_main()
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        calibrated = json.loads(calibrated_path.read_text(encoding="utf-8"))
+        self.assertEqual(metrics["calibration"]["chosen"]["selected_count"], 0)
+        self.assertGreater(calibrated["routing"]["perplexity_threshold"], 20.0)
+        self.assertEqual(calibrated["calibration"]["split"], "development")
 
     def test_checkpoint_rejects_a_different_experiment_and_repairs_only_its_last_line(self):
         path = self.directory / "checkpoint.jsonl"

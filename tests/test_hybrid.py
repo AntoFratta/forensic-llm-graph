@@ -185,6 +185,26 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(review["status"], "ok")
         self.assertTrue(review["entities"][0]["format_valid"])
 
+    def test_explicit_nonstandard_identifiers_are_kept_but_unlabelled_numbers_are_not(self):
+        for label, prefix in (("TAX_CODE", "Codice fiscale"), ("VAT_NUMBER", "Partita IVA")):
+            text = f"{prefix}: 9876543210; allegato 12345."
+            passage = {"start": 0, "core_start": 0, "core_end": len(text), "text": text}
+            response = json.dumps({"entities": [{"text": "9876543210", "label": label},
+                                                {"text": "12345", "label": label}]})
+            review = parse_review(response, passage, "test-model")
+            self.assertEqual(review["status"], "partial")
+            self.assertEqual(len(review["entities"]), 1)
+            entity = review["entities"][0]
+            self.assertFalse(entity["format_valid"])
+            self.assertIn("context_supported_nonstandard_identifier", entity["review_reasons"])
+
+    def test_short_phone_numbers_are_not_discarded_as_invalid_lengths(self):
+        text = "Hanno chiamato il 112."
+        passage = {"start": 0, "core_start": 0, "core_end": len(text), "text": text}
+        review = parse_review('{"entities":[{"text":"112","label":"PHONE"}]}', passage, "test-model")
+        self.assertEqual(review["status"], "ok")
+        self.assertIn("short_phone_number", review["entities"][0]["review_reasons"])
+
     def test_transaction_and_document_numbers_are_not_bank_accounts(self):
         for prefix in ("assegno n.", "bonifico CRO", "contratto n."):
             with self.subTest(prefix=prefix):
