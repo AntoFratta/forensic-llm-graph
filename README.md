@@ -1,309 +1,120 @@
 # Forensic LLM Graph
 
-Experimental master's thesis project on Italian forensic entity recognition.
-The first pass combines rules and an Italian spaCy model. The second-pass runner
-adds Minerva perplexity and selective Qwen review. Its first real GPU execution
-is a technical smoke test; task accuracy has not yet been established.
+Master's thesis project on named entity recognition (NER) in Italian forensic and legal texts. The current implementation extracts entity mentions with rules and spaCy, then uses a language model to review selected passages. Relation extraction and graph construction are planned for a later stage.
 
-## Environment
+## How it works
 
-Use Python 3.10–3.13. The baseline uses spaCy 3.8.11 and `it_core_news_lg` 3.8.0.
-Both are installed by `requirements.txt`, including the model's fixed download
-URL and checksum. No model files are stored in this repository.
-The same requirements file includes the libraries for Minerva and Qwen; their
-weights are downloaded when the second-pass runner loads them.
+1. **Rules and spaCy.** Rules identify structured mentions such as dates, tax codes and bank coordinates. The Italian spaCy model `it_core_news_lg` detects names and places. The extractor records character offsets in the original text and flags candidates with uncertain boundaries, overlaps or ambiguous context.
+2. **Perplexity and LLM review.** Minerva-350M scores passages for perplexity. The router combines this signal with first-pass review flags and possible omissions to prioritize passages for Qwen3-8B. The pipeline validates the returned labels and spans against the original text, then merges them with the first-pass candidates. If the review fails validation, the original candidates are retained.
+
+The ten labels are `PERSON`, `COMPANY`, `ROLE`, `LOCATION`, `EMAIL`, `PHONE`, `TAX_CODE`, `VAT_NUMBER`, `BANK_ACCOUNT` and `TIME`. Dates are kept as written, and bank coordinates can include IBANs and other account numbers.
+
+## Corpus
+
+| Collection | Contents | Documents |
+| --- | --- | ---: |
+| REDIT | Administrative forms with fictitious personal values | 126 |
+| ArchivioAntimafia | Italian judicial and investigative PDFs | 7 |
+| DICE | Italian crime news articles | 10,363 |
+| Rizzo synthetic subset | Generated Italian banking examples | 155 |
+| **Total** | | **10,651** |
+
+The downloader retrieves the source files listed in [`configs/data_sources.json`](configs/data_sources.json). Preparation reconstructs text from the REDIT token offsets, extracts the text already embedded in PDFs, and filters empty or duplicate DICE articles. Raw data, generated outputs and reviewed reference files are kept outside Git.
+
+## Run on Google Colab
+
+1. Open the **[rules and spaCy notebook](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/rules_and_spacy_ner_colab.ipynb)** in a CPU runtime. Run the setup, data preparation and extraction cells. Download `outputs/baseline.json` from the Files panel.
+2. Open the **[perplexity and LLM review notebook](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/perplexity_llm_review_colab.ipynb)** in a T4 GPU runtime. Upload `baseline.json` to `/content/`. Enable the `HF_TOKEN` Colab Secret with a Hugging Face read token that has access to `sapienzanlp/Minerva-350M-base-v1.0`.
+3. In the second notebook, set `run_corpus = True` to process the corpus and download `outputs/hybrid_corpus.json` when it finishes. The reference evaluation sections are optional and require a matching, human-reviewed reference JSON.
+
+The notebooks clone the repository and install the dependencies. Model files are downloaded into the runtime. The recorded GPU pass took about one hour on a T4 with cached weights. Allow additional time for the initial model downloads.
+
+### Command-line equivalents
+
+Run these commands from the repository root with Python 3.10–3.13.
 
 ```bash
 python -m pip install -r requirements.txt
-```
-
-The extractor runs on CPU. The GPU can be used for later language-model stages.
-The initial 130-document baseline has run on Colab with Python 3.13 and these
-versions. The expanded corpus uses the same model and dependencies.
-
-## Input
-
-Download the configured sources and prepare their texts:
-
-```bash
 python scripts/download_data.py
 python scripts/prepare_data.py
+python scripts/run_pipeline.py --output outputs/baseline.json
+python scripts/run_hybrid.py --input outputs/baseline.json --output outputs/hybrid_corpus.json
 ```
 
-`configs/data_sources.json` records URLs, file hashes and the synthetic selection.
-The downloader checks existing files before reuse, restores missing REDIT TSVs,
-and ignores macOS archive metadata. Changed files require explicit `--overwrite`.
-The synthetic subset is reconstructed from the first 2,000 records of a pinned
-source revision, retaining at most five Italian banking examples per template.
-It reproduces the same 155 records without downloading the entire 1.3 GB source.
-Hash mismatches stop execution rather than silently changing the corpus.
+The first pass runs on CPU. The hybrid command requires CUDA and access to Minerva through `HF_TOKEN`. Both stages write JSON with run metadata, original document text and entity spans. The hybrid output also records passage scores, routing decisions and review status.
 
-The prepared collection contains 126 REDIT documents, seven ArchivioAntimafia
-PDFs (198 pages), 10,363 DICE articles and 155 synthetic diagnostic texts:
-10,651 documents overall. DICE contributes 10,395 source records before excluding
-21 empty texts and 11 exact text duplicates. This is a working corpus, not an
-independently annotated final test set.
+### Evaluate saved results
 
-This creates four local files in `data/processed/`:
+Use the optional evaluation sections in the second notebook with the first-pass JSON, saved hybrid predictions and matching annotations. Scoring saved predictions runs on CPU without a Hugging Face token.
 
-- `documents.json`: complete document texts and source metadata for extraction.
-- `redit_annotations.json`: original token-level annotation fields, stored separately.
-- `synthetic_annotations.json`: original synthetic entities and a banking-only mapping,
-  when the optional subset is present; these require review before evaluation.
-- `preparation_report.json`: document/page counts, extraction version and warnings.
+<details>
+<summary>Example reference JSON</summary>
 
-REDIT text is reconstructed from token offsets, filling gaps with spaces. Its
-source labels and relation fields are preserved without conversion to a new gold
-standard. PDF text is extracted as stored, including existing OCR errors, and
-pages are joined with two newlines. Page boundaries are recorded in the joined
-text. No dates, names or spelling are corrected. Empty or low-text pages are
-reported; this does not detect all extraction problems. OCR is not performed.
-
-When present, the DICE CSV is decoded as UTF-8 or Windows-1252. Empty article
-texts and exact text duplicates are excluded, with their identifiers and reasons
-recorded in the preparation report. Whitespace normalization is used only for
-duplicate comparison. The retained article text is not changed; source URL,
-publisher crime category and dates remain metadata, not reference annotations.
-All retained articles are included, without selection based on model predictions.
-Near-duplicate articles and related events still require grouping before a final
-development/test split. If the CSV is absent, its omission is reported explicitly.
-
-The optional `data/raw/rizzo_banking_subset.json` contains an explicitly synthetic
-Italian diagnostic collection with its dataset revision and selection procedure.
-Its original texts, source line identifiers and template groups are preserved.
-No source annotations enter the extractor input. Synthetic results must be
-reported separately; template groups must remain together in any development/test
-split. The current subset is a bounded, template-balanced sample, not a random
-sample or proof of performance on real forensic documents. Missing optional data
-are explicitly recorded; the pipeline does not download them automatically.
-
-The input to the extractor, `documents.json`, has this structure:
+This example assumes the first-pass result contains document `example-01` from source `example` with the exact text shown below. Use the passage ID and boundaries written by `python scripts/run_hybrid.py --prepare-only --output outputs/passage_preview.json`. Offsets are zero-based, document-relative character positions with exclusive end offsets. Compute `text_sha256` over the passage text encoded as UTF-8.
 
 ```json
-[
-  {
-    "id": "example-01",
-    "text": "Mario Rossi vive a Roma. Email: nome@example.org.",
-    "document": "example.txt",
-    "page": 1
-  }
-]
+{
+  "schema_version": 1,
+  "split": "test",
+  "split_frozen": true,
+  "core_chars": 800,
+  "context_chars": 160,
+  "units": [
+    {
+      "id": "example-01@0:18",
+      "reference_id": "example-01",
+      "document_id": "example-01",
+      "source": "example",
+      "split": "test",
+      "annotation_status": "reviewed",
+      "human_review": true,
+      "start": 0,
+      "core_start": 0,
+      "core_end": 18,
+      "end": 18,
+      "text": "Mario vive a Roma.",
+      "text_sha256": "7e726d5cdd334db8313f40e3fcb883b6ff5bd9a5d78a2bb3ea45313a010c50af",
+      "entities": [
+        {"start": 0, "end": 5, "label": "PERSON", "text": "Mario"},
+        {"start": 13, "end": 17, "label": "LOCATION", "text": "Roma"}
+      ]
+    }
+  ]
+}
 ```
 
-Only `id` and `text` are required. Identifiers must be unique strings. Text is
-not normalized. Optional source fields are copied to the results; existing input
-annotations are not copied or used by the extractor. Local data and outputs are
-excluded from Git. The development material under `research/` is also excluded
-and will not be available after cloning the repository on Colab.
+</details>
 
-## Run the first pass
+## Experimental results
 
-```bash
-python scripts/run_pipeline.py --config configs/baseline.json
-```
+### Held-out reference
 
-Paths in the configuration are relative to the repository root. Absolute paths,
-including mounted Google Drive paths, are also accepted. The model is loaded once
-and reused across documents. A missing or mismatched model stops the run.
-Texts are processed through `nlp.pipe` with `spacy_batch_size` set to eight in the
-configuration. Results retain input order and original offsets. The same spaCy
-components remain enabled as in the earlier sequential runs, including POS tags.
-Batching is an execution change; its effect on elapsed time must be measured.
+The controlled comparison used 12 human-reviewed excerpts with 137 annotated mentions. A separate set of 12 excerpts was used for development. A prediction counts as correct only if its start, end and label match the reference. Micro precision, recall and F1 pool the entity counts across all 12 test excerpts and all labels.
 
-For a rules-only check, without installing spaCy:
+| Method | Precision | Recall | F1 |
+| --- | ---: | ---: | ---: |
+| Rules and spaCy | 63.70% | 62.77% | 63.24% |
+| Selective Qwen review with perplexity | 64.44% | 63.50% | 63.97% |
+| Selective Qwen review without perplexity | 62.14% | 63.50% | 62.82% |
 
-```bash
-python scripts/run_pipeline.py --config configs/baseline.json --rules-only
-```
+Both hybrid variants had the same review budget and selected three excerpts each. With perplexity, F1 was 0.73 percentage points higher than the baseline on this sample. The small reference limits how far this result can be generalized.
 
-Use `--overwrite` only when intentionally replacing previous results. Otherwise
-use `--output` to keep each run separately, without editing the configuration:
+### Full-corpus execution
 
-```bash
-python scripts/run_pipeline.py --output outputs/02_address_review_spacy_lg.json
-```
+Minerva scored all **28,581 passages** from the **10,651 documents**. The review budget selected **100 passages** for Qwen, 31 from ArchivioAntimafia and 69 from DICE. Qwen returned 81 complete, 18 partial and one invalid response after validation.
 
-The effective output path is recorded in the run metadata.
+The global selection did not include any of the 12 annotated test excerpts, so their precision, recall and F1 remained at the baseline values in the table. The accuracy of the globally selected passages was outside the coverage of the annotated reference.
 
-## Google Colab
+The reported comparisons use a saved first-pass result from commit [`59ddcfe`](https://github.com/AntoFratta/forensic-llm-graph/commit/59ddcfe77dfd4f03beb3801e8088d049a07c9e0c) and the hybrid method from commit [`b20a42b`](https://github.com/AntoFratta/forensic-llm-graph/commit/b20a42ba6620948c0f881bdcc2181aabb232e93b). Reproducing the recorded evaluation requires the saved first-pass JSON and reviewed reference. Running the notebooks from the current checkout generates new predictions.
 
-Open [the first-pass notebook](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/first_pass_colab.ipynb)
-after pushing the changes to GitHub. It contains the complete ordered setup,
-download, preparation, extraction and inspection cells. Use a CPU runtime for
-this stage. No perplexity or LLM component runs yet.
+## Repository layout
 
-The equivalent commands, after cloning the repository and installing requirements,
-are:
+| Path | Contents |
+| --- | --- |
+| [`configs/`](configs/) | Data sources, model revisions and routing settings |
+| [`scripts/`](scripts/) | Data preparation, extraction and evaluation entry points |
+| [`src/`](src/) | Entity rules, passage construction, model loading, validation and scoring |
+| [`notebooks/`](notebooks/) | Colab workflows |
+| [`tests/`](tests/) | Automated tests |
 
-```python
-!python scripts/download_data.py
-!python scripts/prepare_data.py
-!python scripts/run_pipeline.py --output outputs/05_batched_form_boundaries_spacy_lg.json
-```
-
-The setup installs the model in the Colab environment. It does not need to be
-downloaded again for every extraction in the same session. Download the output
-manually from the Colab file panel to retain it after the runtime ends.
-For a recorded experiment, check out the intended Git commit before execution.
-If the session is still active after a short local change, push the code and run
-`git pull --ff-only` before rerunning the necessary cells. A new session requires
-the complete setup again. Preserve the output before disconnecting for longer
-local analysis or code changes.
-
-## Checks
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-These checks run offline and require no spaCy model. They cover reuse of matching
-files, protection of changed data, checksum failure, selective ZIP extraction and
-deterministic synthetic selection. Temporary test files are created under the
-ignored `outputs/` directory and removed afterwards.
-Additional checks cover personal-field boundaries, address prefixes, original
-dates, preprocessed NLP input and batch output integrity. Model stand-ins test
-the integration logic; recognition quality and real batch execution require the
-installed model on Colab.
-
-## Results
-
-`outputs/baseline.json` contains run metadata and per-document candidates. Each
-candidate includes its text, label, source, start/end character offsets and any
-review reasons. Start is inclusive and end is exclusive, relative to the document:
-`text[start:end]` equals the returned mention.
-
-Labels are `PERSON`, `COMPANY`, `ROLE`, `LOCATION`, `EMAIL`, `PHONE`, `TAX_CODE`,
-`VAT_NUMBER`, `BANK_ACCOUNT`, and `TIME`. Bank identifiers have a subtype when
-recognized. Original dates are retained without interpreting day/month order.
-
-Review flags are heuristic signals, not confidence scores. Unflagged candidates
-can still be wrong. Names with no proper-noun POS tag, generic place terms,
-legislative abbreviations and possible form fields receive additional review
-flags. POS signals are used only when the NLP pipeline provides those tags.
-Common form terms predicted as names are flagged even when their POS tag is
-PROPN. This vocabulary is an explicit development heuristic and may also flag
-legitimate names; candidates are not discarded solely on that basis.
-The context `sottoscritto/a ... nato/a` or an M/F field can suggest a person span.
-When its boundaries agree with an NLP span, apart from an M/F suffix, the
-form-based PERSON candidate takes precedence over a conflicting name prediction.
-The change is flagged and the original prediction is retained in
-`alternative_predictions`. Original spaCy labels are recorded as `nlp_label`.
-Adjacent `Nome` and `Cognome` fields produce separate PERSON values, excluding
-their labels. Conflicting NLP spans are replaced only when the surrounding text
-contains field labels, separators or an M/F suffix; unexplained words remain
-flagged for review. Residence prefixes such as `residente in` are excluded from
-LOCATION spans and the boundary adjustment is recorded.
-An `ORG` prediction without a recognized legal suffix is retained
-as a tentative `COMPANY` candidate with a review flag. A word such as `società`
-alone is not sufficient to remove that flag. Administrative prefixes such as
-`Comune di` are excluded from geographic spans and the adjustment is flagged.
-Generic place words cannot be added as city names when merging addresses.
-NLP names fully contained in an address are stored in its `absorbed_entities`
-field rather than counted as separate mentions. Other overlaps are retained and
-flagged. Digit-count
-checks do not validate checksums or establish that an account exists.
-
-The run records the input hash, code revision, uncommitted-change status, model
-and library versions, mode, candidate counts and elapsed times. These are
-development outputs, not final LLM decisions or precision/recall/F1 scores.
-Timing covers the full selected spaCy pipeline, not only its NER component.
-The effective batch size and enabled components are recorded in each run.
-The `by_source` field reports counts separately for each collection, including
-the synthetic diagnostics. Progress is printed every 100 documents.
-Generated JSON files use LF line endings on both Windows and Colab to avoid
-platform-dependent input hashes caused by serialization alone.
-
-## Second pass and reference evaluation
-
-Open `notebooks/second_pass_colab.ipynb` from GitHub in a T4 runtime. Install the
-shared requirements, enable the `HF_TOKEN` Secret and upload the saved run 05
-plus `test_reference.reviewed.json` from the local ignored research folder after both test review batches are confirmed.
-Reviewed data and source texts are not committed to this repository.
-
-Development used 12 human-reviewed extracts, three per source. The current stage fixes the method and evaluates 12 separately reviewed test extracts.
-The complete working corpus is unchanged. Development and test use separate
-source groups; the test selection is fixed before annotation, with three judicial windows from one held-out PDF/case.
-The reduced manual reference contains 24 extracts overall. It is exploratory,
-not a population-representative sample of Italian forensic language.
-
-```bash
-python scripts/run_hybrid.py --input /content/05_batched_form_boundaries_spacy_lg.json --reference /content/test_reference.reviewed.json --compare-routing
-```
-
-Minerva-350M scores original text without prompts. It is released before Qwen3-8B
-loads with NF4 weights and FP16 computation. Both revisions are pinned in
-`configs/hybrid.json`. Thinking is disabled. The final test reviews the union of fixed with/without-perplexity selections, generating each window once. Primary output merges only the with-perplexity selection.
-No training or fine-tuning is performed. `--development-all` refuses test data.
-
-Operational passages now use 800-character cores and 160 characters of context,
-matching the reference partition. The previous smoke tests used larger windows.
-Short final remainders are absorbed. Text and offsets remain unchanged; the core
-containing a mention's start owns it. Existing candidates can extend the context
-to preserve a complete mention. Reference labels never enter the prompt or routing.
-
-Qwen returns exact mention strings and short exact context quotations. Ambiguous
-repeated strings are not located by guessing. A unique literal can recover bad
-optional alignment metadata with a flag. Validation checks schema, grounding,
-formats and clear type conflicts. An explicit fiscal/VAT field may support a
-malformed value, retained with `format_valid=false` and a review reason. Short
-phone numbers are supported. These checks do not establish semantic correctness.
-Exact quotation alignment also tolerates whitespace-only differences while retaining original mention offsets. One validation retry is allowed; all attempts and their token/time costs are saved.
-
-Complete responses replace other first-pass candidates in reviewed cores while
-preserving all unflagged first-pass mentions on omission. Partial responses add
-validated candidates without deleting originals. Failed responses retain the
-first pass. This fusion policy is explicit and evaluated, not calibrated confidence.
-The recorded first-pass file is never changed by the second pass.
-
-```bash
-python scripts/evaluate.py --reference /content/development_reference.reviewed.json --baseline /content/05_batched_form_boundaries_spacy_lg.json --hybrid outputs/09_development_models.json --calibrate-routing --calibrated-config outputs/09_calibrated_hybrid.json --output outputs/09_development_evaluation.json
-```
-
-Evaluation counts exact `(start, end, label)` matches. Boundary and category errors
-produce false positives and false negatives. Every occurrence is scored, including
-repeated names and temporal references. Results separate REDIT forms, news and judicial texts from generated synthetic
-text, report per-category support, and use null for undefined metrics.
-
-Routing calibration compares three development quantiles, the configured diagnostic percentile and a threshold above the observed maximum. If development F1 does not vary across trials, the configured percentile is a fixed fallback rather than a measured quality optimum. It selects micro F1 on REDIT, DICE and ArchivioAntimafia, breaking
-ties by fewer reviews and the higher threshold. The saved configuration keeps the
-chosen threshold fixed for subsequent evaluation. The review budget is identical
-across trials. The flags-only comparison removes both perplexity eligibility and
-perplexity tie-breaking. The all-review result is a development diagnostic.
-Budget comparisons operate on the annotated reference subset; full-corpus routing
-may select a different proportion because its distribution and absolute cap differ.
-
-`--prepare-only` validates inputs and builds windows without model dependencies.
-`--score-only` omits Qwen. The earlier `--smoke-test` mode remains available for
-technical checks, but it is not a final quality evaluation. A normal selective run
-requires a fixed threshold. Calibration refuses test references; test evaluation
-requires an explicitly frozen selection and reviewed annotations.
-
-Scores and reviews are flushed to a companion `.checkpoints.jsonl`. `--resume`
-requires identical input, reference, code, configuration, scope and library versions.
-An existing result is protected; use a new name or intentionally use `--overwrite`.
-Save outputs manually before disconnecting Colab. The notebook does not download
-results automatically or mount Drive.
-
-Original REDIT annotations remain separate. Their labels and boundaries require
-an explicit mapping before an additional source-reference benchmark. Synthetic
-source labels are diagnostics and are not automatically treated as reviewed gold.
-
-## Finalization and recorded-response replay
-
-Run 09 development selected the same three windows for all tried thresholds.
-The final threshold is its fixed 80th percentile, 42.77412162359235. This is not
-evidence of a perplexity benefit. Report the held-out with/without comparison
-even if its outcomes are equal. The absolute corpus cap is 100 windows; on the
-12-window reference this and the original 500 cap both allow three reviews.
-
-`scripts/evaluate.py --replay-validation` revalidates saved development responses
-after parser/fusion changes. It verifies the original Git generation source and
-prompt, records original/evaluated fingerprints and adds no model generations.
-It refuses test references and changed generation implementations. Raw run files
-remain unchanged. Replays are distinguished from fresh model runs in reports.
-
-The notebook's last section is disabled by default. After inspecting the final
-test, it can run the complete corpus in the same runtime, reusing downloaded
-weights. Minerva scores all passages; Qwen reviews at most 100 prioritized windows.
-Its separate reference report measures the actual global routing outcome on the
-checked test cores. Save all generated results manually before disconnecting.
+Run the tests with `python -m unittest discover -s tests`.

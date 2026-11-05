@@ -1,7 +1,7 @@
 """Run first-pass extraction on prepared documents and record experiment metadata.
 
-Input annotations are not used. This script produces entity candidates, not
-evaluation metrics or final decisions from the future LLM filter.
+The output contains entity candidates for review by the hybrid pipeline.
+Source annotations are kept separate from extraction.
 """
 
 import argparse

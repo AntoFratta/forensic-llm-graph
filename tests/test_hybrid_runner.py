@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from scripts.run_hybrid import main, read_checkpoint
+from scripts.run_hybrid import load_first_pass, main, read_checkpoint
 from scripts.evaluate import main as evaluate_main
 
 
@@ -44,6 +44,13 @@ class HybridRunnerTests(unittest.TestCase):
         result = json.loads(self.output_path.read_text(encoding="utf-8"))
         self.assertEqual(result["run"]["scope"], "smoke_test")
         self.assertEqual(result["run"]["passage_count"], 1)
+
+    def test_first_pass_requires_valid_run_metadata(self):
+        baseline = json.loads(self.input_path.read_text(encoding="utf-8"))
+        baseline["run"] = None
+        self.input_path.write_text(json.dumps(baseline), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "valid first-pass run metadata"):
+            load_first_pass(self.input_path)
 
     def test_models_run_in_separate_stages_and_checkpoint_can_rebuild_result(self):
         events = []
@@ -129,8 +136,9 @@ class HybridRunnerTests(unittest.TestCase):
         self.assertEqual(calibrated["routing"]["perplexity_threshold"], 20.0)
         self.assertIn("fallback", calibrated["calibration"]["threshold_selection"])
         self.assertEqual(calibrated["calibration"]["split"], "development")
+        self.assertEqual(calibrated["output_path"], "outputs/hybrid_reference.json")
 
-    def test_checkpoint_rejects_a_different_experiment_and_repairs_only_its_last_line(self):
+    def test_checkpoint_rejects_a_different_experiment_and_repairs_an_incomplete_last_line(self):
         path = self.directory / "checkpoint.jsonl"
         header = json.dumps({"kind": "header", "fingerprint": "expected"}).encode() + b"\n"
         valid = b'{"kind":"review","passage_id":"one"}\n'
@@ -141,6 +149,14 @@ class HybridRunnerTests(unittest.TestCase):
         records = read_checkpoint(path, "expected")
         self.assertEqual(len(records), 1)
         self.assertEqual(path.read_bytes(), header + valid)
+
+    def test_checkpoint_rejects_a_malformed_complete_last_line_without_rewriting(self):
+        path = self.directory / "checkpoint.jsonl"
+        content = b'{"kind":"header","fingerprint":"expected"}\n{"malformed": invalid}\n'
+        path.write_bytes(content)
+        with self.assertRaisesRegex(ValueError, "Invalid checkpoint record at line 2"):
+            read_checkpoint(path, "expected")
+        self.assertEqual(path.read_bytes(), content)
 
     def test_fixed_routing_comparison_reviews_the_union_but_merges_only_the_primary_selection(self):
         text = "Anna presenta una breve dichiarazione."
@@ -186,6 +202,9 @@ class HybridRunnerTests(unittest.TestCase):
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         self.assertIn("without_perplexity", metrics["metrics"])
         self.assertEqual(metrics["fixed_routing_comparison"]["selected_passage_ids"], [units[0]["id"]])
+        overall = metrics["metrics"]["hybrid"]["overall"]
+        self.assertEqual((overall["tp"], overall["fp"], overall["fn"]), (2, 0, 1))
+        self.assertAlmostEqual(overall["f1"], 0.8)
 
 
 if __name__ == "__main__":

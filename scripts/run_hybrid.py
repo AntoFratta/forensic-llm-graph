@@ -1,8 +1,8 @@
 """Review selected first-pass passages using Minerva perplexity and Qwen.
 
-Use --smoke-test for the first GPU check, --prepare-only to inspect passage
-construction offline, and --resume to continue matching checkpoint files.
-An extended review requires a perplexity threshold chosen on development data.
+Use --prepare-only to inspect passage construction offline and --resume to
+continue a run from matching checkpoints. Selective review uses a fixed
+perplexity threshold.
 """
 
 import argparse
@@ -36,8 +36,9 @@ def load_first_pass(path: Path) -> tuple[dict, str]:
     result = json.loads(content.decode("utf-8-sig"))
     if not isinstance(result, dict) or not isinstance(result.get("documents"), list) or not result["documents"]:
         raise ValueError("Input must be a first-pass JSON containing documents.")
-    if result.get("run", {}).get("stage") != "first_pass":
-        raise ValueError("Input must be a recorded first-pass run, not another hybrid result.")
+    run = result.get("run")
+    if not isinstance(run, dict) or run.get("stage") != "first_pass":
+        raise ValueError("Input must contain valid first-pass run metadata.")
     seen = set()
     for document in result["documents"]:
         if not isinstance(document, dict):
@@ -139,23 +140,29 @@ def read_checkpoint(path: Path, fingerprint: str) -> list:
     lines = path.read_bytes().splitlines(keepends=True)
     if not lines:
         raise ValueError("Checkpoint is empty; choose another output or use --overwrite.")
+    if not lines[0].endswith(b"\n"):
+        raise ValueError("Checkpoint header is incomplete.")
     header = json.loads(lines[0])
-    if header.get("fingerprint") != fingerprint or header.get("kind") != "header":
+    if not isinstance(header, dict) or header.get("kind") != "header":
+        raise ValueError("Checkpoint header is invalid.")
+    if header.get("fingerprint") != fingerprint:
         raise ValueError("Checkpoint belongs to different data, code, settings or execution scope.")
     records = []
     valid_bytes = len(lines[0])
     for index, line in enumerate(lines[1:], start=1):
-        try:
-            if not line.endswith(b"\n"):
-                raise ValueError("Incomplete checkpoint line.")
-            record = json.loads(line)
-        except ValueError:
+        if not line.endswith(b"\n"):
             if index != len(lines) - 1:
-                raise ValueError("Checkpoint contains an invalid record before its end.")
+                raise ValueError(f"Incomplete checkpoint record at line {index + 1}.")
             with path.open("r+b") as handle:
                 handle.truncate(valid_bytes)
             print("Discarded an incomplete trailing checkpoint record.", flush=True)
             break
+        try:
+            record = json.loads(line)
+        except ValueError as exc:
+            raise ValueError(f"Invalid checkpoint record at line {index + 1}.") from exc
+        if not isinstance(record, dict):
+            raise ValueError(f"Invalid checkpoint record at line {index + 1}.")
         records.append(record)
         valid_bytes += len(line)
     return records

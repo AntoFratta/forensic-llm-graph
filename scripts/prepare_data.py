@@ -1,6 +1,6 @@
-"""Prepare texts from REDIT, ArchivioAntimafia and DICE.
+"""Prepare REDIT forms, ArchivioAntimafia PDFs, DICE articles and synthetic banking texts.
 
-Text for extraction and existing REDIT annotations are saved separately.
+Save the text for extraction separately from the available source annotations.
 Raw files are read only; PDF text is not corrected or processed with OCR.
 """
 
@@ -360,8 +360,8 @@ def main() -> None:
                 "PDF pages are joined with two newlines; no OCR or text correction is applied.",
                 "Low-text detection does not identify every OCR or extraction error.",
                 "DICE annotations are not used; only empty and exact duplicate texts are excluded.",
-                "Similar news and related cases must be grouped before final development/test splitting.",
-                "Synthetic banking data are diagnostic and must be reported separately from real documents.",
+                "Similar news and related cases should stay in the same split when building a reference.",
+                "The synthetic banking subset retains its source and template identifiers.",
             ],
         }
         output_dir.mkdir(parents=True, exist_ok=True)

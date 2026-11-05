@@ -8,18 +8,36 @@ import hashlib
 import json
 import math
 from pathlib import Path
-import sys
 import re
 import subprocess
+import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.run_hybrid import code_hash, load_first_pass, write_result
 from scripts.run_pipeline import project_path
-from src.evaluation import load_reference, reference_passages, score_reference
+from src.evaluation import _metrics, load_reference, reference_passages, score_reference
 from src.llm_filter import merge_reviews, parse_review
 from src.passages import build_passages, select_passages
+
+
+# The published runner added input and checkpoint checks without changing inference or routing.
+COMPATIBLE_EVALUATION_CODE_HASHES = (
+    "ff6db752bfb62265a56982b217c2a33755d81e67b72d854b98f55dd6ec53de4e",
+    "584b73f513f40f2895099039dfcfc12f6336b5aa7d7a4c1d9f66f61e857f890c",
+)
+
+
+def overall_metrics(result: dict) -> dict:
+    """Pool exact-match counts across all reviewed passages."""
+    units = result["units"]
+    counts = Counter(
+        tp=sum(unit["tp"] for unit in units),
+        fp=sum(len(unit["false_positives"]) for unit in units),
+        fn=sum(len(unit["false_negatives"]) for unit in units),
+    )
+    return _metrics(counts)
 
 
 def routing_trial(reference, documents, passages, scores, reviews, settings, use_perplexity=True):
@@ -161,7 +179,6 @@ def main():
                   "evaluation_script_sha256": hashlib.sha256(Path(__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest(),
                   "metrics": {"first_pass": score_reference(reference, documents)},
                   "limitations": ["Small source-balanced reference, not population-representative accuracy.",
-                                  "REDIT forms, news and judicial texts are separated from generated synthetic diagnostics.",
                                   "Undefined metrics are null; inspect category support before interpreting F1."]}
         if args.hybrid:
             hybrid_path = project_path(args.hybrid)
@@ -170,7 +187,10 @@ def main():
             if (run.get("input_sha256") != baseline_hash or run.get("reference_sha256") != reference_hash
                     or run.get("stage") != "hybrid"):
                 raise ValueError("Model output does not match the baseline, reference or executed pipeline code.")
-            if run.get("code_sha256") != code_hash() and not args.replay_validation:
+            recorded_code, current_code = run.get("code_sha256"), code_hash()
+            if (recorded_code != current_code
+                    and (recorded_code, current_code) != COMPATIBLE_EVALUATION_CODE_HASHES
+                    and not args.replay_validation):
                 raise ValueError("Pipeline code changed; rerun the models or explicitly verify a development validation replay.")
             expected = {u["id"] for u in reference["units"]}
             if {p["id"] for p in hybrid["passages"]} != expected or len(hybrid["passages"]) != len(expected):
@@ -203,20 +223,19 @@ def main():
                 if config_output:
                     config = deepcopy(run["config"])
                     config["routing"]["perplexity_threshold"] = result["chosen_threshold"]
-                    config["output_path"] = "outputs/10_hybrid_reference_test.json"
+                    config["output_path"] = "outputs/hybrid_reference.json"
                     config["calibration"] = {"split": "development", "reference_sha256": reference_hash,
-                                             "evaluation_output": str(output_path), "objective": result["objective"],
+                                             "objective": result["objective"],
                                              "threshold_selection": result["threshold_selection"],
                                              "pipeline_code_sha256": code_hash()}
                     config_output.parent.mkdir(parents=True, exist_ok=True)
                     write_result(config_output, config)
+        for result in report["metrics"].values():
+            result["overall"] = overall_metrics(result)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         write_result(output_path, report)
         for mode, result in report["metrics"].items():
-            print(mode)
-            for group in ("source_documents", "synthetic"):
-                if group in result["groups"]:
-                    print(" ", group, result["groups"][group]["micro"])
+            print(f"{mode}: {result['overall']}")
         if "calibration" in report:
             print("Development threshold:", report["calibration"]["chosen_threshold"])
         print("Saved", output_path)
