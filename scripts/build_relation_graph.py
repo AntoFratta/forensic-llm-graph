@@ -50,12 +50,16 @@ def main() -> None:
     parser.add_argument("--input", required=True, help="Saved first-pass or hybrid NER JSON.")
     parser.add_argument("--output", default="outputs/relation_graph.json")
     parser.add_argument("--relation-reviews", help="Saved Qwen responses to add to the graph.")
+    parser.add_argument("--revalidate-reviews", action="store_true",
+                        help="Reapply current validation to saved complete Qwen attempts.")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing graph.")
     args = parser.parse_args()
 
     try:
         input_path, output_path = project_path(args.input), project_path(args.output)
         review_path = project_path(args.relation_reviews) if args.relation_reviews else None
+        if args.revalidate_reviews and review_path is None:
+            raise ValueError("Revalidation requires --relation-reviews.")
         if output_path in (input_path, review_path) or output_path.suffix.lower() != ".json":
             raise ValueError("Choose a JSON output distinct from the input.")
         if output_path.exists() and not args.overwrite:
@@ -67,11 +71,13 @@ def main() -> None:
         if review_path is not None:
             content = review_path.read_bytes()
             review = json.loads(content.decode("utf-8-sig"))
-            if review["run"].get("code_sha256") != graph_code_hash(with_review=True):
+            if (not args.revalidate_reviews
+                    and review["run"].get("code_sha256") != graph_code_hash(with_review=True)):
                 raise ValueError("The relation review was produced with different graph code.")
-            reviewed = load_review_relations(review, documents, input_sha256)
+            reviewed = load_review_relations(review, documents, input_sha256, revalidate=args.revalidate_reviews)
             review_metadata = {"relation_review_sha256": hashlib.sha256(content).hexdigest(),
-                               "relation_review": review["run"]}
+                               "relation_review": review["run"],
+                               "relation_review_revalidated": args.revalidate_reviews}
 
         graph = build_graph(documents, core_chars, reviewed)
         node_counts = Counter(node["type"] for node in graph["nodes"])
