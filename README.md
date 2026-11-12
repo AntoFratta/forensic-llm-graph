@@ -171,29 +171,29 @@ The reported comparisons use a saved first-pass result from commit [`59ddcfe`](h
 
 The graph has document nodes and subject nodes for people and companies. It records where a subject is mentioned, where two subjects occur in the same passage, and where the text states a directed relationship. The explicit extractor covers selected expressions of employment, roles and legal representation. Every edge stores evidence offsets in the input document. Subject names are grouped within each document by normalised spelling and label. [Graph construction](src/relation_graph.py) · [Relation patterns](src/explicit_relations.py)
 
-Build the rules-based graph from saved NER results. Use an output name that identifies the run.
+Build the rules-based graph from saved NER results. Use the same short numeric prefix for the plan, graph and evaluation files from one experiment.
 
 ```bash
-python scripts/build_relation_graph.py --input outputs/hybrid_corpus.json --output outputs/relation_graph_rules_RUN_ID.json
+python scripts/build_relation_graph.py --input outputs/hybrid_corpus.json --output outputs/02_relation_graph_rules.json
 ```
 
 To add Qwen proposals, prepare a review plan. Supplying `--reference` limits the plan to eligible excerpts from a saved evaluation sample. The plan uses the excerpt text and offsets. For a corpus run, omit `--reference` and set the passage budget with `--max-passages`.
 
 ```bash
-python scripts/review_relation_graph.py prepare --input outputs/hybrid_corpus.json --reference outputs/relation_reference_RUN_ID.json --output outputs/relation_plan_RUN_ID.json
+python scripts/review_relation_graph.py prepare --input outputs/hybrid_corpus.json --reference outputs/02_relation_reference.json --output outputs/02_relation_plan.json
 ```
 
-Upload the plan to the [relation review notebook](notebooks/qwen_relation_review_colab.ipynb) on a Colab T4 runtime. Download the review JSON and use its generated filename in the build command. The builder verifies that the review belongs to the same NER input and resolves the proposed quotations against the original text.
+Upload the plan to the [relation review notebook](notebooks/qwen_relation_review_colab.ipynb) on a Colab T4 runtime. The notebook names the review using the plan's prefix. The builder verifies that the review belongs to the same NER input and resolves the proposed quotations against the original text.
 
 ```bash
-python scripts/build_relation_graph.py --input outputs/hybrid_corpus.json --relation-reviews outputs/relation_reviews_RUN_ID.json --output outputs/relation_graph_qwen_RUN_ID.json
+python scripts/build_relation_graph.py --input outputs/hybrid_corpus.json --relation-reviews outputs/02_relation_reviews.json --output outputs/02_relation_graph_qwen.json
 ```
 
 Score each graph against the same reviewed reference. The scorer counts a relation as correct when the direction, endpoint labels, and all three spans match exactly.
 
 ```bash
-python scripts/evaluate_relation_graph.py --graph outputs/relation_graph_rules_RUN_ID.json --reference outputs/relation_reference_RUN_ID.json --output outputs/relation_evaluation_rules_RUN_ID.json
-python scripts/evaluate_relation_graph.py --graph outputs/relation_graph_qwen_RUN_ID.json --reference outputs/relation_reference_RUN_ID.json --output outputs/relation_evaluation_qwen_RUN_ID.json
+python scripts/evaluate_relation_graph.py --graph outputs/02_relation_graph_rules.json --reference outputs/02_relation_reference.json --output outputs/02_relation_results_rules.json
+python scripts/evaluate_relation_graph.py --graph outputs/02_relation_graph_qwen.json --reference outputs/02_relation_reference.json --output outputs/02_relation_results_qwen.json
 ```
 
 ## Repository layout
