@@ -1,4 +1,4 @@
-"""Prepare REDIT forms, ArchivioAntimafia PDFs, DICE articles and synthetic banking texts.
+"""Prepare REDIT forms, judicial PDFs, DICE articles and synthetic banking texts.
 
 Save the text for extraction separately from the available source annotations.
 Raw files are read only; PDF text is not corrected or processed with OCR.
@@ -115,7 +115,7 @@ def read_redit(path: Path, raw_dir: Path) -> tuple[dict, dict]:
     return document, annotations
 
 
-def read_pdf(path: Path, raw_dir: Path) -> dict:
+def read_pdf(path: Path, raw_dir: Path, *, source: str = "archivio_antimafia") -> dict:
     """Return one complete PDF text with source metadata and page boundaries.
 
     Page offsets refer to the joined document, with start inclusive and end
@@ -140,8 +140,11 @@ def read_pdf(path: Path, raw_dir: Path) -> dict:
         parts.append(text)
         position += len(text) + len(PAGE_SEPARATOR)
 
-    document = source_info(path, raw_dir, "archivio_antimafia")
-    document["text"] = PAGE_SEPARATOR.join(parts)
+    text = PAGE_SEPARATOR.join(parts)
+    if not text.strip():
+        raise ValueError(f"PDF has no extractable text: {path.name}")
+    document = source_info(path, raw_dir, source)
+    document["text"] = text
     document["pages"] = pages
     return document
 
@@ -288,12 +291,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--raw-dir", default="data/raw")
     parser.add_argument("--output-dir", default="data/processed")
+    parser.add_argument("--source-config", default="configs/data_sources.json")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
     try:
         raw_dir = project_path(args.raw_dir)
         output_dir = project_path(args.output_dir)
+        source_config = json.loads(project_path(args.source_config).read_text(encoding="utf-8-sig"))
+        file_sources = {entry["filename"]: entry for entry in source_config["files"]}
         tsv_files = sorted((raw_dir / "data-tsv").glob("*.tsv"))
         pdf_files = sorted(raw_dir.glob("*.pdf"))
         if not tsv_files or not pdf_files:
@@ -315,7 +321,11 @@ def main() -> None:
             annotations.append(annotation)
         print(f"Read {len(tsv_files)} REDIT documents.")
         for path in pdf_files:
-            document = read_pdf(path, raw_dir)
+            metadata = file_sources.get(path.name, {})
+            document = read_pdf(path, raw_dir, source=metadata.get("source", "archivio_antimafia"))
+            if metadata and document["source_sha256"] != metadata["sha256"]:
+                raise ValueError(f"PDF checksum differs from the source configuration: {path.name}")
+            document.update({key: metadata[key] for key in ("url", "case_id", "text_quality") if key in metadata})
             documents.append(document)
             print(f"Read {path.name}: {len(document['pages'])} pages.")
 
@@ -354,6 +364,10 @@ def main() -> None:
                 {"document": d["id"], "page": page["page"]}
                 for d in documents for page in d.get("pages", []) if page["low_text"]
             ],
+            "pdf_text_quality": [
+                {"document": d["id"], "note": d["text_quality"]}
+                for d in documents if "text_quality" in d
+            ],
             "notes": [
                 "REDIT text is reconstructed from token offsets; gaps are filled with spaces.",
                 "Source annotations are retained separately and are not a validated NER reference.",
@@ -370,7 +384,7 @@ def main() -> None:
                 json.dumps(content, ensure_ascii=False, indent=2), encoding="utf-8", newline="\n",
             )
         print(f"Saved {len(documents)} complete documents to {output_dir}")
-    except (OSError, ValueError, csv.Error, PdfReadError) as exc:
+    except (OSError, ValueError, KeyError, csv.Error, PdfReadError) as exc:
         parser.exit(1, f"Error: {exc}\n")
 
 

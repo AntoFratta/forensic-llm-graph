@@ -23,10 +23,12 @@ _TAX_CODE = _pattern(
     r"\b[A-Z]{6}[0-9LMNPQRSTUV]{2}[ABCDEHLMPRST]"
     r"[0-9LMNPQRSTUV]{2}[A-Z][0-9LMNPQRSTUV]{3}[A-Z]\b"
 )
-_VAT = _pattern(
-    r"\b(?:partita\s+i\.?\s*v\.?\s*a\.?|p\.?\s*i\.?\s*v\.?\s*a\.?)"
-    r"\s*[:=]?\s*(?P<value>\d(?:[ .]?\d){7,12})(?!\d)"
-)
+_FISCAL_FIELD = r"(?:codice\s+fiscale|c\.?\s*f\.?)"
+_VAT_FIELD = r"(?:partita\s+i\.?\s*v\.?\s*a\.?|p\.?\s*i\.?\s*v\.?\s*a\.?)"
+_FIELD_SUFFIX = r"\s*(?:n(?:umero)?\.?)?\s*[:=]?\s*"
+_FISCAL_NUMBER = r"(?P<value>\d(?:[ .]?\d){7,12})(?!\d)"
+_NUMERIC_TAX_CODE = _pattern(rf"\b{_FISCAL_FIELD}{_FIELD_SUFFIX}{_FISCAL_NUMBER}")
+_VAT = _pattern(rf"\b{_VAT_FIELD}{_FIELD_SUFFIX}{_FISCAL_NUMBER}")
 _PHONE = _pattern(
     r"\b(?:telefono(?:\s+fisso)?|telefonico|tel\.?|cellulare|cell\.?|fax)"
     r"(?:\s*/\s*(?:cellulare|telefono))?\s*(?:n\.?|numero)?\s*[:=]?\s*"
@@ -62,11 +64,12 @@ _RELATIVE_TIME = _pattern(
 )
 # This initial role vocabulary is intentionally context-sensitive and is flagged.
 _ROLES = _pattern(
-    r"\b(?:amministrator[ei](?:\s+(?:unic[oi]|delegat[oi]))?|"
+    r"\b(?:amministrat(?:or[ei]|ric[ei])(?:\s+(?:unic[oaie]|delegat[oaie]|di\s+fatto))?|"
     r"legale\s+rappresentante|rappresentante\s+legale|"
     r"procurator[ei](?:\s+della\s+Repubblica)?(?:\s+aggiunt[oi])?|"
     r"pubblic[oi]\s+minister[oi]|giudice(?:\s+per\s+le\s+indagini\s+preliminari)?|"
-    r"presidente|direttor[ei]|dirigente|responsabile(?:\s+del\s+servizio)?|"
+    r"presidente|direttor[ei]|direttric[ei]|dirigente|responsabile(?:\s+del\s+servizio)?|"
+    r"avvocat[oa](?:\s+difensor[ea]|(?=\s+di\s+fiducia))|difensor[ea]|dipendent[ei]|liquidator[ei]|"
     r"sindaco|titolare|imprenditor[ei]|consulente|magistrat[oi]|"
     r"collaboratore\s+di\s+giustizia|carabinier[ei]|teste)\b|\b(?:P\.\s*M\.|Avv\.)"
 )
@@ -205,7 +208,7 @@ def structured_format_valid(value: str, label: str) -> bool | None:
 def _extract_rules(text: str) -> list:
     """Extract structured mentions, addresses and role candidates.
 
-    Context words introduce phone, VAT and account numbers but are excluded from
+    Context words introduce phone, fiscal and account numbers but are excluded from
     their spans. Unusual digit counts are flagged rather than discarded.
     """
     result = []
@@ -229,15 +232,15 @@ def _extract_rules(text: str) -> list:
                         candidate["subtype"] = "postal_account"
                     else:
                         candidate["subtype"] = "account_number"
-    for pattern, label, rule in [(_VAT, "VAT_NUMBER", "vat_context"), (_PHONE, "PHONE", "phone_context")]:
+    for pattern, label, rule in [
+        (_NUMERIC_TAX_CODE, "TAX_CODE", "numeric_tax_code_context"),
+        (_VAT, "VAT_NUMBER", "vat_context"), (_PHONE, "PHONE", "phone_context"),
+    ]:
         before = len(result)
         _add_matches(result, text, pattern, label, rule)
         for candidate in result[before:]:
             digits = re.sub(r"\D", "", candidate["text"])
-            if label == "VAT_NUMBER":
-                valid = len(digits) == 11
-            else:
-                valid = 6 <= len(digits) <= 15
+            valid = 6 <= len(digits) <= 15 if label == "PHONE" else structured_format_valid(candidate["text"], label)
             candidate["format_valid"] = valid
             if not valid:
                 _flag(candidate, "unexpected_digit_count")

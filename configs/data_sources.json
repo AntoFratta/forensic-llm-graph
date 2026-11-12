@@ -1,5 +1,5 @@
 {
-  "description": "Fixed data sources for the Italian first-pass NER experiment. Files are downloaded from their original sources, not redistributed in this repository.",
+  "description": "Fixed data sources for the Italian NER and relation graph corpus. Judicial copies are identified by case and file checksum.",
   "redit": {
     "filename": "data-tsv.zip",
     "url": "https://raw.githubusercontent.com/dhfbk/redit/main/data-tsv.zip",
@@ -162,12 +162,38 @@
     {
       "filename": "mafia_appalti_archiviazione.pdf",
       "url": "https://www.archivioantimafia.org/sentenze2/mafia_appalti_archiviazione.pdf",
-      "sha256": "458b809d40c8e43f34120b3bd7e0fa628468b32dcfc6b50c1d9da6b171f2ab84"
+      "sha256": "458b809d40c8e43f34120b3bd7e0fa628468b32dcfc6b50c1d9da6b171f2ab84",
+      "text_quality": "The embedded text can split names and company words. Check annotated spans against the rendered page."
     },
     {
       "filename": "scarantino_240694.pdf",
       "url": "https://www.archivioantimafia.org/altri_documenti/scarantino/scarantino_240694.pdf",
-      "sha256": "62f1e2768a30b201827ab1f2e26116f618fa18c90438d2f2da055ab892e1b95e"
+      "sha256": "62f1e2768a30b201827ab1f2e26116f618fa18c90438d2f2da055ab892e1b95e",
+      "text_quality": "The scanned transcript has OCR errors in names. Use the page image before annotating or correcting the extracted text."
+    },
+    {
+      "filename": "cassazione_13016_2024.pdf",
+      "url": "https://www.ilcaso.it/giurisprudenza/archivio/31062.pdf",
+      "sha256": "a8f1e706ca33911058725ff1a5c20a06fcc805b26e6111174546af8f31af50bc",
+      "source": "corte_cassazione",
+      "case_id": "cassazione_penale_13016_2024",
+      "text_quality": "The published copy masks some personal names. Annotate visible mentions and retain the redactions."
+    },
+    {
+      "filename": "cassazione_32560_2025.pdf",
+      "url": "https://www.studiolegalenoto.it/wp-content/uploads/2025/10/cassazione-penale-sentenza-32560-2025.pdf",
+      "sha256": "1cd36534c0c4d1e392be49f0b0a9345a182bbbe4c1cc25d39b98299b2bf1841c",
+      "source": "corte_cassazione",
+      "case_id": "cassazione_penale_32560_2025",
+      "text_quality": "Public anonymised reproduction of the judgment. Some words are split in the embedded text."
+    },
+    {
+      "filename": "cassazione_30039_2025.pdf",
+      "url": "https://generazione231.it/wp-content/uploads/2025/09/Cassazione-30039.pdf",
+      "sha256": "8a269c168dbf043a81d0f5bcda6f7bfb12ffb9947c76b787fa35a0340735a524",
+      "source": "corte_cassazione",
+      "case_id": "cassazione_penale_30039_2025",
+      "text_quality": "Public anonymised reproduction of the judgment. The PDF includes web print headers and footers."
     },
     {
       "filename": "italian_crime_news.csv",

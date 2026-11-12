@@ -13,6 +13,12 @@ def document(text, named=()):
 
 
 class RelationGraphTests(unittest.TestCase):
+    def test_public_body_does_not_become_a_company_node(self):
+        text = "Lea Blu, dipendente del Comune di Roma."
+        graph = build_graph([document(text, (("Lea Blu", "PERSON"), ("Comune di Roma", "COMPANY")))])
+        self.assertFalse(any(node.get("label") == "COMPANY" for node in graph["nodes"]))
+        self.assertFalse(any(edge["type"] == "EXPLICIT_RELATION" for edge in graph["edges"]))
+
     def test_descriptive_subject_replaces_mistagged_place_in_relation(self):
         text = "Una 42enne di Carpi, legale rappresentante della società Alfa."
         graph = build_graph([document(text, (("Carpi", "PERSON"), ("società Alfa", "COMPANY")))])

@@ -3,7 +3,7 @@
 from itertools import combinations
 import unicodedata
 
-from src.explicit_relations import extract_explicit_relations
+from src.explicit_relations import extract_explicit_relations, is_company_candidate
 from src.passages import build_passages
 
 
@@ -30,6 +30,8 @@ def _subject_mentions(document: dict) -> list:
             raise ValueError(f"Subject mention does not match the text in {document['id']}.")
         if not isinstance(entity.get("needs_review"), bool):
             raise ValueError(f"Subject mention lacks review status in {document['id']}.")
+        if entity["label"] == "COMPANY" and not is_company_candidate(value):
+            continue
         unique[_span_key(entity)] = entity
     return [unique[key] for key in sorted(unique)]
 

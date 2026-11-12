@@ -20,7 +20,7 @@ from src.relation_review import load_review_relations
 def graph_code_hash(with_review: bool = False) -> str:
     """Identify the extraction code used for an evaluation run."""
     digest = hashlib.sha256()
-    files = ["src/explicit_relations.py", "src/relation_graph.py", "src/passages.py"]
+    files = ["src/explicit_relations.py", "src/relation_graph.py", "src/passages.py", "src/deterministic.py"]
     if with_review:
         files.append("src/relation_review.py")
     for name in files:

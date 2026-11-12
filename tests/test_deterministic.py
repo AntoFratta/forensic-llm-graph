@@ -36,6 +36,16 @@ class ExtractionTests(unittest.TestCase):
         for entity in entities:
             self.assertEqual(text[entity["start"]:entity["end"]], entity["text"])
 
+    def test_explicit_numeric_fiscal_codes_and_vat_fields_remain_distinct(self):
+        text = "Codice fiscale 9873462111. C.F. 10112312312. Partita IVA n. 23874333312."
+        fiscal = [e for e in extract_entities(text) if e["label"] in {"TAX_CODE", "VAT_NUMBER"}]
+        self.assertEqual(
+            [(e["text"], e["label"], e["format_valid"]) for e in fiscal],
+            [("9873462111", "TAX_CODE", False), ("10112312312", "TAX_CODE", True),
+             ("23874333312", "VAT_NUMBER", True)],
+        )
+        self.assert_offsets(text, fiscal)
+
     def test_paired_form_fields_keep_separate_values_in_both_orders(self):
         for fields, expected in [
             ("Cognome: De Luca Nome: Anna Maria", ["De Luca", "Anna Maria"]),

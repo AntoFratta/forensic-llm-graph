@@ -207,6 +207,14 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(review["status"], "ok")
         self.assertTrue(review["entities"][0]["format_valid"])
 
+    def test_numeric_fiscal_mentions_respect_their_explicit_field(self):
+        for prefix, wrong_label in (("C.F.", "VAT_NUMBER"), ("P. IVA n.", "TAX_CODE")):
+            with self.subTest(prefix=prefix):
+                text = f"{prefix} 01234567890"
+                passage = {"start": 0, "core_start": 0, "core_end": len(text), "text": text}
+                response = json.dumps({"entities": [{"text": "01234567890", "label": wrong_label}]})
+                self.assertEqual(parse_review(response, passage, "test-model")["status"], "invalid_response")
+
     def test_explicit_nonstandard_identifiers_are_kept_but_unlabelled_numbers_are_not(self):
         for label, prefix in (("TAX_CODE", "Codice fiscale"), ("VAT_NUMBER", "Partita IVA")):
             text = f"{prefix}: 9876543210; allegato 12345."

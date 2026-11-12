@@ -7,6 +7,65 @@ from src.relation_review import (load_review_relations, parse_relation_review, s
 
 
 class RelationReviewTests(unittest.TestCase):
+    def test_cue_only_proposal_keeps_original_offsets_for_pdf_ligatures(self):
+        text = "In capo a K.K., semplice dipendente della Raﬃneria."
+        passage = {"text": text, "start": 50, "core_start": 50, "core_end": 50 + len(text)}
+        proposal = {
+            "source": {"text": "K.K.", "label": "PERSON", "kind": "name"},
+            "target": {"text": "Raffineria", "label": "COMPANY", "kind": "description"},
+            "cue": 1,
+        }
+        result = parse_relation_review(json.dumps({"relations": [proposal]}), passage)
+        relation, = result["relations"]
+        target = relation["target"]
+        self.assertEqual(text[target["start"] - 50:target["end"] - 50], "Raﬃneria")
+
+    def test_cue_must_connect_a_person_to_an_in_scope_target(self):
+        cases = [
+            ("Lea Blu, direttrice della clinica, ha incontrato Ada Neri.", "Ada Neri", "clinica", "COMPANY"),
+            ("Lea Blu, dipendente del Comune di Roma.", "Lea Blu", "Comune di Roma", "COMPANY"),
+            ("Lea Blu, difensore di uno dei due imputati.", "Lea Blu", "uno dei due imputati", "COMPANY"),
+            ("Lea Blu non lavora presso una farmacia.", "Lea Blu", "una farmacia", "COMPANY"),
+        ]
+        for text, person, other, label in cases:
+            with self.subTest(text=text):
+                passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text)}
+                proposal = {
+                    "source": {"text": person, "label": "PERSON", "kind": "name"},
+                    "target": {"text": other, "label": label, "kind": "description"},
+                    "cue": 1,
+                }
+                result = parse_relation_review(json.dumps({"relations": [proposal]}), passage)
+                self.assertEqual(result["status"], "invalid_response")
+
+    def test_two_roles_can_share_an_explicit_company(self):
+        text = 'Claudio (amministratore \nunico e poi liquidatore della società "Sigimet s.r.l.")'
+        passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text)}
+        endpoints = {
+            "source": {"text": "Claudio", "label": "PERSON", "kind": "name"},
+            "target": {"text": "Sigimet s.r.l.", "label": "COMPANY", "kind": "name"},
+        }
+        proposals = [{**endpoints, "cue": cue} for cue in (1, 2)]
+        result = parse_relation_review(json.dumps({"relations": proposals}), passage)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            [text[r["predicate_start"]:r["predicate_end"]] for r in result["relations"]],
+            ["amministratore \nunico", "liquidatore"],
+        )
+
+    def test_corpus_review_reserves_slots_for_distinct_judicial_cases(self):
+        text = "Una donna lavora presso una farmacia."
+        documents = [
+            {"id": name, "case_id": case, "source": source, "text": text, "entities": []}
+            for name, case, source in [
+                ("a1", "case-a", "archivio_antimafia"), ("a2", "case-a", "archivio_antimafia"),
+                ("b", "case-b", "corte_cassazione"), ("news", "news", "dice"),
+            ]
+        ]
+        selected, count = select_relation_passages(documents, 800, 160, 3)
+        self.assertEqual(count, 4)
+        self.assertEqual({p["source"] for p in selected[:2]}, {"archivio_antimafia", "corte_cassazione"})
+
     def test_numbered_cue_and_evidence_must_identify_the_same_occurrence(self):
         text = "Lea Blu, direttrice della clinica. Ada Neri, presidente della cooperativa."
         passage = {"text": text, "start": 100, "core_start": 100, "core_end": 100 + len(text)}

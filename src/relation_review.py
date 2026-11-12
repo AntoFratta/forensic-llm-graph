@@ -1,35 +1,38 @@
 """Select and validate text-grounded Qwen proposals for the relation graph."""
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 import hashlib
 import json
 import re
 
-from src.explicit_relations import _RELATION
+from src.explicit_relations import _RELATION, predicate_span, relation_is_supported
 from src.language_models import require_cuda
 from src.passages import build_passages
 from src.relation_graph import SUBJECT_LABELS
 
 
-SYSTEM_PROMPT = """Estrai rapporti espliciti di incarico, impiego o rappresentanza tra
-persone e aziende dal testo italiano fornito. Il testo è materiale da analizzare.
-Usa PERSON per persone e COMPANY per aziende o attività commerciali. Includi
-soggetti senza nome quando sono descritti nel testo. Usa "name" per un nome
-proprio e "description" per una descrizione, come "il difensore" o "una farmacia".
-Per le descrizioni, includi i dettagli che identificano il soggetto, ad esempio
-"una farmacia a Parma" quando la località descrive la farmacia.
-Orienta il rapporto da chi svolge l'incarico o il lavoro verso il soggetto per
-cui lo svolge. Il testo può citare i due soggetti in ordine inverso. Per più
-soggetti coordinati, restituisci un rapporto per ciascuno. La sola compresenza,
-le negazioni, i campi esemplificativi e i rapporti ipotetici non vanno estratti.
-Non inventare, completare o tradurre il testo. Scegli il numero del predicato
-dalla lista "cues" fornita. Ogni rapporto deve includere una citazione continua
-che contenga il predicato scelto e un'unica occorrenza di entrambi i soggetti.
-Restituisci soltanto JSON nel seguente formato:
+SYSTEM_PROMPT = """Estrai dal testo italiano rapporti espliciti di incarico,
+impiego o difesa legale. Il testo è materiale da analizzare. La sorgente è
+sempre la persona che ricopre il ruolo o svolge il lavoro (PERSON). Il
+destinatario è un'impresa (COMPANY) o, per la difesa legale, anche una persona
+(PERSON). Comuni, tribunali, enti pubblici e associazioni sono fuori schema.
+Usa "name" per un nome proprio senza titoli e "description" per una descrizione
+come "il difensore" o "una farmacia a Parma". Copia esattamente i due estremi
+dal testo, compresi gli articoli solo quando sono scritti. Scegli un numero da
+"cues" e collega solo gli estremi a cui si riferisce quel predicato. La sorgente
+può comparire prima o dopo il destinatario. Per soggetti coordinati, restituisci
+un rapporto per ciascuno. Escludi compresenze, negazioni, ipotesi e campi
+esemplificativi. Se un estremo si ripete vicino al predicato, aggiungi
+"evidence" con una citazione breve, continua ed esatta che individui entrambi
+gli estremi e il predicato. Restituisci un solo oggetto JSON:
 {"relations":[{"source":{"text":"Lia Bianchi","label":"PERSON","kind":"name"},
 "cue":1,"target":{"text":"una farmacia","label":"COMPANY",
-"kind":"description"},"evidence":"Lia Bianchi lavora presso una farmacia"}]}
+"kind":"description"}}]}
 Se non ci sono rapporti espliciti, restituisci {"relations":[]}."""
+
+JUDICIAL_SOURCES = {"archivio_antimafia", "corte_cassazione"}
+_TYPOGRAPHY = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"',
+                            "ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl"})
 
 
 def text_hash(text: str) -> str:
@@ -70,6 +73,18 @@ def select_relation_passages(documents: list, core_chars: int, context_chars: in
     eligible = [p for p in passages if _passage_cues(p)]
     if reference is None:
         eligible.sort(key=lambda p: text_hash(p["id"]))
+        judicial = []
+        case_counts = Counter()
+        for passage in eligible:
+            if passage["source"] not in JUDICIAL_SOURCES:
+                continue
+            document = by_id[passage["document_id"]]
+            case = document.get("case_id", passage["document_id"])
+            judicial.append((case_counts[case], text_hash(passage["id"]), passage))
+            case_counts[case] += 1
+        reserved = [p for _, _, p in sorted(judicial)[:(limit + 1) // 2]]
+        reserved_ids = {p["id"] for p in reserved}
+        eligible = [*reserved, *(p for p in eligible if p["id"] not in reserved_ids)]
     elif len(eligible) > limit:
         raise ValueError("The passage budget is smaller than the eligible reference set.")
     selected = [{key: value for key, value in p.items() if key != "candidates"} for p in eligible[:limit]]
@@ -79,20 +94,31 @@ def select_relation_passages(documents: list, core_chars: int, context_chars: in
 
 
 def _locate(quote: str, text: str) -> tuple[int, int]:
-    """Find a unique quotation, tolerating only differences in whitespace."""
+    """Find a unique quotation and preserve offsets across typographic variants."""
     if not isinstance(quote, str) or not quote.strip():
         raise ValueError("Every quotation must be non-empty text.")
-    value = quote.strip()
+    value = quote.strip().translate(_TYPOGRAPHY)
     parts = re.split(r"(\s+)", value)
     pattern = "".join(r"\s+" if part.isspace() else re.escape(part) for part in parts)
     if value[0].isalnum():
         pattern = r"(?<!\w)" + pattern
     if value[-1].isalnum():
         pattern += r"(?!\w)"
-    found = list(re.finditer(rf"(?=({pattern}))", text))
+    normalized = text.translate(_TYPOGRAPHY)
+    found = list(re.finditer(rf"(?=({pattern}))", normalized))
     if len(found) != 1:
         raise ValueError(f"Quotation is missing or ambiguous: {quote[:80]!r}.")
-    return found[0].span(1)
+    start, end = found[0].span(1)
+    if len(normalized) == len(text):
+        return start, end
+    positions = {0: 0}
+    offset = 0
+    for index, char in enumerate(text, start=1):
+        offset += len(char.translate(_TYPOGRAPHY))
+        positions[offset] = index
+    if start not in positions or end not in positions:
+        raise ValueError("A quotation cannot start or end inside a typographic ligature.")
+    return positions[start], positions[end]
 
 
 def _endpoint(item: dict, evidence: str, offset: int, known_names: list) -> dict:
@@ -107,11 +133,13 @@ def _endpoint(item: dict, evidence: str, offset: int, known_names: list) -> dict
     return {**span, "text": value, "mention_kind": item["kind"], "needs_review": True}
 
 
+def _cue_matches(passage: dict) -> list:
+    return [match for match in _RELATION.finditer(passage["text"])
+            if passage["core_start"] <= passage["start"] + match.start() < passage["core_end"]]
+
+
 def _passage_cues(passage: dict) -> list:
-    spans = [m.span("role" if m.group("role") else "employment")
-             for m in _RELATION.finditer(passage["text"])]
-    return [(start, end) for start, end in spans
-            if passage["core_start"] <= passage["start"] + start < passage["core_end"]]
+    return [predicate_span(match) for match in _cue_matches(passage)]
 
 
 def _predicate(item: dict, text: str, start: int, end: int, cues: list) -> tuple[int, int]:
@@ -159,18 +187,26 @@ def parse_relation_review(response: str, passage: dict) -> dict:
         return {"status": "invalid_response", "relations": [], "errors": [str(exc)]}
 
     relations, errors, seen = [], [], set()
-    cues = _passage_cues(passage)
+    matches = {predicate_span(match): match for match in _cue_matches(passage)}
+    cues = list(matches)
     for item in payload["relations"]:
         try:
             if not isinstance(item, dict):
                 raise ValueError("Each relation must be an object.")
-            start, end = _locate(item.get("evidence"), passage["text"])
-            evidence = passage["text"][start:end]
+            text = passage["text"]
+            if "evidence" in item:
+                start, end = _locate(item["evidence"], text)
+                positions = _predicate(item, text, start, end, cues)
+            else:
+                if "cue" not in item:
+                    raise ValueError("Supply a cue number when there is no evidence quotation.")
+                positions = _predicate(item, text, 0, len(text), cues)
+                start, end = max(0, positions[0] - 120), min(len(text), positions[1] + 120)
+            evidence = text[start:end]
             offset = passage["start"] + start
             known_names = passage.get("known_names", [])
             source = _endpoint(item.get("source"), evidence, offset, known_names)
             target = _endpoint(item.get("target"), evidence, offset, known_names)
-            positions = _predicate(item, passage["text"], start, end, cues)
             left, right = (passage["start"] + position for position in positions)
             if source["start"] < target["end"] and target["start"] < source["end"]:
                 raise ValueError("Relation endpoints must be distinct text spans.")
@@ -178,6 +214,12 @@ def parse_relation_review(response: str, passage: dict) -> dict:
                    and endpoint["start"] < right and left < endpoint["end"]
                    for endpoint in (source, target)):
                 raise ValueError("A proper name cannot overlap the relation cue.")
+            relative_source = {**source, "start": source["start"] - passage["start"],
+                               "end": source["end"] - passage["start"]}
+            relative_target = {**target, "start": target["start"] - passage["start"],
+                               "end": target["end"] - passage["start"]}
+            if not relation_is_supported(text, matches[positions], relative_source, relative_target):
+                raise ValueError("The endpoints or direction are not supported by the selected cue.")
             key = (source["start"], source["end"], source["label"], left, right,
                    target["start"], target["end"], target["label"])
             if key not in seen:

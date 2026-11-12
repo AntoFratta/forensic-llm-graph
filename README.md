@@ -50,9 +50,10 @@ Downloading the Minerva weights requires accepting the access conditions on Hugg
 | --- | --- | ---: | --- |
 | REDIT | Administrative forms with fictitious personal values | 126 | [Project page](https://github.com/dhfbk/redit) and [TSV archive](https://github.com/dhfbk/redit/blob/main/data-tsv.zip) |
 | ArchivioAntimafia | Italian judicial and investigative PDFs | 7 | [Archive website](https://www.archivioantimafia.org/) and individual PDFs below |
+| Corte di Cassazione | Criminal judgments from three distinct cases | 3 | [13016/2024](https://www.ilcaso.it/giurisprudenza/archivio/31062.pdf), [32560/2025](https://www.studiolegalenoto.it/wp-content/uploads/2025/10/cassazione-penale-sentenza-32560-2025.pdf), [30039/2025](https://generazione231.it/wp-content/uploads/2025/09/Cassazione-30039.pdf) |
 | DICE | Italian crime news articles | 10,363 | [Dataset description](https://github.com/federicarollo/Italian-Crime-News), [original CSV](https://github.com/federicarollo/Italian-Crime-News/blob/main/italian_crime_news.csv) and [annotated article files](https://github.com/federicarollo/Italian-Crime-News/tree/main/annotation%20csv) |
 | Rizzo synthetic subset | Generated Italian banking examples | 155 | [Hugging Face dataset card](https://huggingface.co/datasets/rizzoaiacademy/rizzo-pii-it-dataset). The downloader builds the subset from `synthetic/synthetic_pii_it_200k.jsonl`. |
-| **Total** | | **10,651** | |
+| **Total** | | **10,654** | |
 
 <details>
 <summary>Read the seven ArchivioAntimafia PDFs used in the corpus</summary>
@@ -69,13 +70,13 @@ Downloading the Minerva weights requires accepting the access conditions on Hugg
 
 The REDIT TSVs are distributed in a ZIP archive. The full DICE CSV exceeds GitHub’s preview limit and is available through the raw file link on its page.
 
-The downloader retrieves the source files listed in [`configs/data_sources.json`](configs/data_sources.json). Preparation reconstructs text from the REDIT token offsets, extracts the text already embedded in PDFs, and filters empty or duplicate DICE articles. Raw data, generated outputs and reviewed reference files are kept outside Git.
+The downloader retrieves and checks the source files listed in [`configs/data_sources.json`](configs/data_sources.json). Preparation reconstructs text from the REDIT token offsets, extracts the embedded PDF text with the pinned `pypdf` version, and filters empty or duplicate DICE articles. PDF records carry source metadata and page offsets. The three added judgments have distinct case IDs. The preparation report records known extraction issues such as OCR errors, redactions and web print headers. Raw data, generated outputs and reviewed reference files are kept outside Git.
 
 ## Run on Google Colab
 
-1. Open the **[rules and spaCy notebook](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/rules_and_spacy_ner_colab.ipynb)** in a CPU runtime. Run the setup, data preparation and extraction cells. Download `outputs/baseline.json` from the Files panel.
-2. Open the **[perplexity and LLM review notebook](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/perplexity_llm_review_colab.ipynb)** in a T4 GPU runtime. Upload `baseline.json` to `/content/`. Enable the `HF_TOKEN` Colab Secret with a Hugging Face read token that has access to `sapienzanlp/Minerva-350M-base-v1.0`.
-3. In the second notebook, set `run_corpus = True` to process the corpus and download `outputs/hybrid_corpus.json` when it finishes. The reference evaluation sections are optional and require a matching, human-reviewed reference JSON.
+1. Open the **[rules and spaCy notebook](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/rules_and_spacy_ner_colab.ipynb)** in a CPU runtime. Upload the verified `documents.json` to `/content/` or let the notebook prepare the registered sources. Run extraction with run number `05` and download `05_ner_baseline.json`.
+2. Open the **[perplexity and LLM review notebook](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/perplexity_llm_review_colab.ipynb)** in a T4 GPU runtime. Upload `05_ner_baseline.json` to `/content/`. Enable the `HF_TOKEN` Colab Secret with a Hugging Face read token that has access to `sapienzanlp/Minerva-350M-base-v1.0`.
+3. Set `run_corpus = True` to produce `05_ner_corpus.json`. Then set `run_relations = True` in the next section to produce `05_relation_plan.json` and `05_relation_reviews.json` on the same T4. Download all three files. The reference evaluation sections are optional.
 
 The notebooks clone the repository, install the dependencies and download the model files into the runtime. Allow additional time for the initial model downloads.
 
@@ -137,6 +138,8 @@ This example assumes the first-pass result contains document `example-01` from s
 
 ## Experimental results
 
+These results come from the original 10,651-document snapshot. The three added judgments extend the corpus for subsequent judicial evaluation.
+
 ### Held-out test
 
 The evaluation uses a reference set of passages whose entity categories and boundaries were reviewed manually. During development, 12 excerpts with 90 mentions were used to refine the method. The final comparison used a separate set of 12 excerpts with 137 annotated mentions. The test gives each source three excerpts, while about 97% of the full corpus documents come from DICE. The three judicial excerpts came from one case.
@@ -169,7 +172,7 @@ The reported comparisons use a saved first-pass result from commit [`59ddcfe`](h
 
 ## Build and evaluate the relation graph
 
-The graph has document nodes and subject nodes for people and companies. It records where a subject is mentioned, where two subjects occur in the same passage, and where the text states a directed relationship. The explicit extractor covers selected expressions of employment, roles and legal representation. Every edge stores evidence offsets in the input document. Subject names are grouped within each document by normalised spelling and label. [Graph construction](src/relation_graph.py) · [Relation patterns](src/explicit_relations.py)
+The graph has document nodes and subject nodes for people and companies. It records where a subject is mentioned, where two subjects occur in the same passage, and where the text states a directed relationship. The explicit extractor covers selected expressions of employment, roles and legal representation. Every edge stores evidence offsets in the input document. Subject names are grouped within each document by normalised spelling and label. Explicit public bodies and person descriptions are screened out of the COMPANY label. [Graph construction](src/relation_graph.py) · [Relation patterns](src/explicit_relations.py)
 
 Build the rules-based graph from saved NER results. Use the same short numeric prefix for the plan, graph and evaluation files from one experiment.
 
@@ -177,13 +180,13 @@ Build the rules-based graph from saved NER results. Use the same short numeric p
 python scripts/build_relation_graph.py --input outputs/hybrid_corpus.json --output outputs/02_relation_graph_rules.json
 ```
 
-To add Qwen proposals, prepare a review plan. Supplying `--reference` limits the plan to eligible excerpts from a saved evaluation sample. The plan uses the excerpt text and offsets. For a corpus run, omit `--reference` and set the passage budget with `--max-passages`.
+To add Qwen proposals, prepare a review plan. Supplying `--reference` limits the plan to eligible excerpts from a saved evaluation sample. For a corpus run, omit `--reference` and set the passage budget with `--max-passages`. The corpus plan reserves half the slots for eligible judicial passages, giving each case with a recorded ID an initial turn and using the document ID when the case ID is unavailable. Remaining slots use the deterministic passage order.
 
 ```bash
 python scripts/review_relation_graph.py prepare --input outputs/hybrid_corpus.json --reference outputs/02_relation_reference.json --output outputs/02_relation_plan.json
 ```
 
-Upload the plan to the [relation review notebook](notebooks/qwen_relation_review_colab.ipynb) on a Colab T4 runtime. The notebook names the review using the plan's prefix. The builder verifies that the review belongs to the same NER input and resolves the proposed quotations against the original text.
+Run the review in the full-corpus notebook or upload the plan to the standalone [relation review notebook](notebooks/qwen_relation_review_colab.ipynb). The builder checks that the review belongs to the same NER input. The validator locates the quoted endpoints in the original text and checks their attachment to the chosen predicate and their direction.
 
 ```bash
 python scripts/build_relation_graph.py --input outputs/hybrid_corpus.json --relation-reviews outputs/02_relation_reviews.json --output outputs/02_relation_graph_qwen.json

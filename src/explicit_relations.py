@@ -2,6 +2,8 @@
 
 import re
 
+from src.deterministic import _COMPANY_SUFFIX
+
 
 _ARTICLE = r"(?:(?:un|una|uno|il|la|lo)\s+|l['’])"
 _PLACE_WORD = r"[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ]+(?:[-'’][A-ZÀ-ÖØ-Þ]?[a-zà-öø-ÿ]+)*"
@@ -19,6 +21,7 @@ _ORIGIN = (
 _COMPANY_NOUN = (
     r"(?:centro\s+(?:benessere|estetico|commerciale|fitness)|"
     r"rivendita(?:\s+di(?:\s+(?!(?:e|ed|o|che|ha)\b)(?-i:[a-zà-öø-ÿ]+)){1,2})?|"
+    r"farmacia|pasticceria|filiale\s+di\s+banca|caseificio|raffineria|"
     r"(?:società|azienda|ditta|impresa|cooperativa)"
     r"(?:\s+(?:edile|agricola|commerciale|assicurativa|finanziaria|locale|privata)\b)?)\b"
 )
@@ -29,19 +32,24 @@ _BARE_DESCRIPTION = {
     "COMPANY": re.compile(rf"{_COMPANY_NOUN}(?=\s*(?:[.,;:!?)»”]|$))", re.IGNORECASE),
 }
 _RELATION = re.compile(
-    r"\b(?:(?P<employment>lavor(?:a|ava|ò|erà)\s+(?:presso|per))\b\s*|"
-    r"(?P<role>(?:ex\s+)?(?:(?P<legal>avvocat[oa]|difensor[ea])|"
-    r"(?:amministratore|amministratrice)(?:\s+(?:delegat[oa]|unic[oa]))?|legale\s+rappresentante|"
-    r"rappresentante\s+legale|presidente|direttor[ea]|direttrice|dipendente))"
-    r"\s+(?P<link>dell['’]|(?:di|del|della|dello|dei|degli|delle)\b)\s*)",
+    r"\b(?:(?P<employment>lavor(?:a|ava|ò|erà)\s+(?:presso|per|in))\b\s*|"
+    r"(?P<assistance>difensor[ea]|avvocat[oa])(?=\s+(?:Avv\.|di\s+fiducia\b))|"
+    r"(?P<role>(?:ex\s+)?(?:(?P<legal>avvocat[oa](?:\s+difensor[ea])?|difensor[ea])|"
+    r"amministrat(?:ore|rice)(?:\s+(?:delegat[oa]|unic[oa]|di\s+fatto))?|legale\s+rappresentante|"
+    r"rappresentante\s+legale|presidente|direttor[ea]|direttrice|dipendente|titolare|liquidator[ea]))"
+    r"(?:\s+(?P<link>dell['’]|(?:di|del|della|dello|dei|degli|delle)\b)\s*|"
+    r"(?=\s+(?:e\s+poi\s+liquidator[ea]\b|con\s+(?:il\s+fratello|la\s+sorella)\b))))",
     re.IGNORECASE,
 )
 _SUBJECT_LINK = re.compile(
-    r"\s*,?\s*(?:(?:è|era|fu|è\s+stat[oa])\s+)?"
-    r"(?:(?:il|la|lo|un|una|uno)\s+|l['’])?",
+    r"\s*[,\(–-]?\s*(?:(?:che(?:\s+pure)?|quale|come|è|era|fu|è\s+stat[oa])\s+)?"
+    r"(?:(?:il|la|lo|un|una|uno)\s+|l['’])?(?:semplice\s+)?"
+    r"(?:amministrat(?:ore|rice)\s+(?:unic[oa]\s+)?e\s+poi\s+)?",
     re.IGNORECASE,
 )
 _TARGET_LINK = re.compile(r'\s*["«“]?\s*')
+_COMPANY_TARGET_LINK = re.compile(r'\s*(?:società|ditta|azienda|impresa)\s+["«“]?\s*', re.I)
+_LEGAL_TARGET_LIST = re.compile(r'\s*["«“]?\s*[^.;:!?\n]{2,56}\s+(?:e|ed)\s+["«“]?\s*', re.I)
 _COORDINATION = re.compile(r'\s*["»”]?\s+(?:e|ed)\s+', re.IGNORECASE)
 _ROLE_ARTICLE = re.compile(rf"\b{_ARTICLE}$", re.IGNORECASE)
 _NON_ASSERTED_ROLE = re.compile(
@@ -49,6 +57,85 @@ _NON_ASSERTED_ROLE = re.compile(
     r"|\b(?:sarebbe|potrebbe\s+essere)\s+$",
     re.IGNORECASE,
 )
+_NON_COMPANY = re.compile(
+    rf"^(?:{_ARTICLE})?(?:comune|provincia|regione|ministero|tribunale|corte|prefettura|questura|procura|stato|"
+    r"collegio\s+giudicante|comitato|commissione\s+parlamentare|federazione|associazione|onlus|"
+    r"pubblica\s+assistenza|federconsumatori|confesercenti|confagricoltura|distretto|"
+    r"azienda\s+(?:sanitaria|ospedaliera)|ausl|asl|"
+    r"sindac[oa]|presidente|avvocat[oa]|difensor[ea]|(?:uno\s+dei\s+)?(?:due\s+)?imputat[oaie])\b",
+    re.I,
+)
+_AFTER_ROLE = re.compile(r"\s+e\s+poi\s+liquidator[ea]\s+(?:dell['’]|della\s+|del\s+|di\s+)\s*", re.I)
+_CO_HOLDER = re.compile(
+    r"\s+con\s+(?:il\s+fratello|la\s+sorella)\s+[^,;:!?\n]{1,60}?\s+(?:dell['’]|della\s+|del\s+|di\s+)\s*", re.I,
+)
+_APPOSITION = re.compile(r'\s*["»”]?\s*[,\(–-]\s*(?:(?:avv\.|avvocat[oa]|dott\.|sig\.)\s*)?', re.I)
+_ROLE_OWNER = re.compile(rf"\s*{_ARTICLE}(?:ex\s+)?", re.I)
+_DEFENCE_TITLE = re.compile(r"\s+(?:(?:Avv\.|avvocat[oa])\s+)?", re.I)
+_ASSISTED_BY = re.compile(r"\bassistit[oa]\s+(?:dall['’]|dal\s+|dalla\s+)$", re.I)
+_COUNSEL_FOR = re.compile(r"\s*,\s*(?:a\s+mezzo\s+del(?:lo)?\s+(?:proprio\s+)?)", re.I)
+
+
+def is_company_candidate(text: str) -> bool:
+    """Exclude explicit public bodies and person descriptions from COMPANY."""
+    return not _NON_COMPANY.match(text.strip()) or bool(_COMPANY_SUFFIX.search(text))
+
+
+def predicate_span(match: re.Match) -> tuple[int, int]:
+    if match.group("assistance"):
+        return match.span("assistance")
+    return match.span("role" if match.group("role") else "employment")
+
+
+def _target_start(text: str, match: re.Match) -> int:
+    after = _AFTER_ROLE.match(text, match.end()) or _CO_HOLDER.match(text, match.end())
+    return after.end() if after else match.end()
+
+
+def _target_labels(match: re.Match) -> set:
+    return {"PERSON", "COMPANY"} if match.group("legal") or match.group("assistance") else {"COMPANY"}
+
+
+def _target_link(text: str, label: str) -> bool:
+    return bool(_TARGET_LINK.fullmatch(text)
+                or label == "COMPANY" and _COMPANY_TARGET_LINK.fullmatch(text))
+
+
+def relation_is_supported(text: str, match: re.Match, source: dict, target: dict) -> bool:
+    """Check that the proposed ends attach to this predicate in the right direction."""
+    if source["label"] != "PERSON" or target["label"] not in _target_labels(match):
+        return False
+    if target["label"] == "COMPANY" and not is_company_candidate(target["text"]):
+        return False
+    left, right = predicate_span(match)
+    article = _ROLE_ARTICLE.search(text, max(0, left - 6), left)
+    prefix_end = article.start() if article else left
+    if _NON_ASSERTED_ROLE.search(text[max(0, prefix_end - 32):prefix_end]):
+        return False
+    if match.group("assistance"):
+        if target["end"] <= left < right <= source["start"]:
+            return bool(_COUNSEL_FOR.fullmatch(text[target["end"]:left])
+                        and _DEFENCE_TITLE.fullmatch(text[right:source["start"]]))
+        return bool(right <= source["start"] < source["end"] <= target["start"]
+                    and _ASSISTED_BY.search(text[max(0, left - 35):left])
+                    and re.fullmatch(r"\s+di\s+fiducia\s+", text[right:source["start"]], re.I)
+                    and _APPOSITION.fullmatch(text[source["end"]:target["start"]]))
+    target_start = _target_start(text, match)
+    if target["start"] < target_start:
+        return False
+    gap = text[target_start:target["start"]]
+    if not (_target_link(gap, target["label"]) or match.group("legal") and _LEGAL_TARGET_LIST.fullmatch(gap)):
+        return False
+    if source["end"] <= left and _SUBJECT_LINK.fullmatch(text[source["end"]:left]):
+        return True
+    if source["start"] <= left < right == source["end"] and _ROLE_OWNER.fullmatch(text[source["start"]:left]):
+        return not _NON_ASSERTED_ROLE.search(text[max(0, source["start"] - 32):source["start"]])
+    if match.group("role") and target["end"] <= source["start"]:
+        return bool(_APPOSITION.fullmatch(text[target["end"]:source["start"]]))
+    return bool(match.group("role") and match.group("role").casefold() == "titolare"
+                and right <= source["start"] < source["end"] <= target_start
+                and re.fullmatch(r"\s+con\s+(?:il\s+fratello|la\s+sorella)\s+", text[right:source["start"]], re.I)
+                and re.fullmatch(r"\s+(?:dell['’]|della\s+|del\s+|di\s+)\s*", text[source["end"]:target_start], re.I))
 
 
 def _description(match: re.Match, label: str) -> dict:
@@ -93,8 +180,9 @@ def _role_subject(text: str, start: int, end: int) -> dict | None:
 def _target(text: str, mentions: list, start: int, labels: set) -> dict | None:
     candidates = [
         mention for mention in mentions
-        if mention["label"] in labels and 0 <= mention["start"] - start <= 8
-        and _TARGET_LINK.fullmatch(text[start:mention["start"]])
+        if mention["label"] in labels and 0 <= mention["start"] - start <= 24
+        and (mention["label"] != "COMPANY" or is_company_candidate(mention["text"]))
+        and _target_link(text[start:mention["start"]], mention["label"])
     ]
     return min(candidates, key=lambda mention: (
         mention["start"], -mention["end"], mention.get("mention_kind") != "description",
@@ -102,12 +190,13 @@ def _target(text: str, mentions: list, start: int, labels: set) -> dict | None:
 
 
 def _targets(text: str, mentions: list, match: re.Match, labels: set):
-    target = _target(text, mentions, match.end(), labels)
+    target_start = _target_start(text, match)
+    target = _target(text, mentions, target_start, labels)
     link = match.group("link") or ""
     if link.casefold() in {"del", "della", "dello", "dell'", "dell’"}:
         # In "dell'azienda" the article is part of the preposition.
         for label in sorted(labels):
-            descriptor = _BARE_DESCRIPTION[label].match(text, match.end())
+            descriptor = _BARE_DESCRIPTION[label].match(text, target_start)
             if descriptor and (target is None or (target["start"], target["end"]) == descriptor.span()):
                 target = _description(descriptor, label)
                 break
@@ -131,14 +220,15 @@ def extract_explicit_relations(text: str, named_mentions: list) -> list:
     mentions = [*named_mentions, *_descriptions(text)]
     relations = []
     for match in predicates:
+        if match.group("assistance"):
+            continue
         source = _subject(text, mentions, match.start())
-        predicate_start, predicate_end = match.span("role" if match.group("role") else "employment")
+        predicate_start, predicate_end = predicate_span(match)
         if source is None and match.group("role"):
             source = _role_subject(text, predicate_start, predicate_end)
         if source is None:
             continue
-        targets = {"PERSON", "COMPANY"} if match.group("legal") else {"COMPANY"}
-        for target in _targets(text, mentions, match, targets):
+        for target in _targets(text, mentions, match, _target_labels(match)):
             relations.append({
                 "source": source, "target": target,
                 "predicate_start": predicate_start, "predicate_end": predicate_end,
