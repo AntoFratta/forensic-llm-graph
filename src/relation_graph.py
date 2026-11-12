@@ -3,7 +3,7 @@
 from itertools import combinations
 import unicodedata
 
-from src.explicit_relations import extract_explicit_relations, is_company_candidate
+from src.explicit_relations import extract_explicit_relations, is_subject_candidate
 from src.passages import build_passages
 
 
@@ -30,28 +30,27 @@ def _subject_mentions(document: dict) -> list:
             raise ValueError(f"Subject mention does not match the text in {document['id']}.")
         if not isinstance(entity.get("needs_review"), bool):
             raise ValueError(f"Subject mention lacks review status in {document['id']}.")
-        if entity["label"] == "COMPANY" and not is_company_candidate(value):
+        if not is_subject_candidate(value, entity["label"]):
             continue
         unique[_span_key(entity)] = entity
     return [unique[key] for key in sorted(unique)]
 
 
 def _relation_mentions(named: list, relations: list) -> list:
-    """Keep a descriptive subject in place of names incorrectly nested in it."""
-    descriptions = {
+    """Include grounded endpoints and suppress names nested in their descriptions."""
+    mentions = {
         _span_key(mention): mention
         for relation in relations
         for mention in (relation["source"], relation["target"])
-        if mention.get("mention_kind") == "description"
     }
-    mentions = list(descriptions.values())
+    descriptions = [mention for mention in mentions.values() if mention.get("mention_kind") == "description"]
     for mention in named:
         if not any(description["label"] == mention["label"]
                    and description["start"] <= mention["start"]
                    and mention["end"] <= description["end"]
-                   for description in descriptions.values()):
-            mentions.append(mention)
-    return sorted(mentions, key=_span_key)
+                   for description in descriptions):
+            mentions.setdefault(_span_key(mention), mention)
+    return sorted(mentions.values(), key=_span_key)
 
 
 def _add_explicit_edges(text: str, relations: list, mentions: dict, edges: list) -> None:

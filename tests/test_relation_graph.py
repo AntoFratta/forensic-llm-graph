@@ -14,10 +14,12 @@ def document(text, named=()):
 
 class RelationGraphTests(unittest.TestCase):
     def test_public_body_does_not_become_a_company_node(self):
-        text = "Lea Blu, dipendente del Comune di Roma."
-        graph = build_graph([document(text, (("Lea Blu", "PERSON"), ("Comune di Roma", "COMPANY")))])
-        self.assertFalse(any(node.get("label") == "COMPANY" for node in graph["nodes"]))
-        self.assertFalse(any(edge["type"] == "EXPLICIT_RELATION" for edge in graph["edges"]))
+        for target in ("Comune di Roma", "Consiglio comunale di Parma", "Commissione", "Arcigay Parma"):
+            with self.subTest(target=target):
+                text = f"Lea Blu, dipendente di {target}."
+                graph = build_graph([document(text, (("Lea Blu", "PERSON"), (target, "COMPANY")))])
+                self.assertFalse(any(node.get("label") == "COMPANY" for node in graph["nodes"]))
+                self.assertFalse(any(edge["type"] == "EXPLICIT_RELATION" for edge in graph["edges"]))
 
     def test_descriptive_subject_replaces_mistagged_place_in_relation(self):
         text = "Una 42enne di Carpi, legale rappresentante della società Alfa."
@@ -56,6 +58,42 @@ class RelationGraphTests(unittest.TestCase):
         self.assertEqual(nodes[edges[0]["target"]]["name"], "un imputato")
         self.assertEqual(nodes[edges[0]["target"]]["mention_kind"], "description")
         self.assertTrue(any(edge["type"] == "CO_OCCURS_WITH" for edge in graph["edges"]))
+
+    def test_legal_representation_recovers_an_unnamed_client_before_the_lawyer(self):
+        text = "Propone ricorso l'imputato, a mezzo del proprio difensore Avv. Lea Blu, in Cassazione."
+        graph = build_graph([document(text, (("Lea Blu", "PERSON"),))])
+        nodes = {node["id"]: node for node in graph["nodes"]}
+        edge, = [edge for edge in graph["edges"] if edge["type"] == "EXPLICIT_RELATION"]
+        self.assertEqual(nodes[edge["source"]]["name"], "Lea Blu")
+        self.assertEqual(nodes[edge["target"]]["name"], "l'imputato")
+        self.assertEqual(edge["relation"], "difensore")
+
+    def test_qualified_legal_role_and_coordinated_initials_resolve_to_clients(self):
+        text = "Lea Blu, difensore di ﬁducia di A.A., B.B. e C.C., ha risposto."
+        graph = build_graph([document(text, (("Lea Blu", "PERSON"), ("ﬁducia di A.A.", "PERSON")))])
+        nodes = {node["id"]: node for node in graph["nodes"]}
+        edges = [edge for edge in graph["edges"] if edge["type"] == "EXPLICIT_RELATION"]
+        self.assertEqual({nodes[edge["target"]]["name"] for edge in edges}, {"A.A.", "B.B.", "C.C."})
+        self.assertEqual({nodes[edge["source"]]["name"] for edge in edges}, {"Lea Blu"})
+        self.assertNotIn("ﬁducia di A.A.", {node.get("name") for node in nodes.values()})
+        text = "Il difensore di A.A., B.B., C.C. ha risposto."
+        graph = build_graph([document(text, (("B.B.", "PERSON"),))])
+        nodes = {node["id"]: node for node in graph["nodes"]}
+        edges = [edge for edge in graph["edges"] if edge["type"] == "EXPLICIT_RELATION"]
+        self.assertEqual({nodes[edge["target"]]["name"] for edge in edges}, {"A.A.", "B.B.", "C.C."})
+        self.assertEqual({nodes[edge["source"]]["name"] for edge in edges}, {"Il difensore"})
+
+    def test_named_apposition_identifies_the_role_holder(self):
+        cases = (
+            ("commenta la direttrice della farmacia, Lea Blu - Ha chiamato.", "Lea Blu"),
+            ("parla la direttrice della farmacia, Lea Blu sta ascoltando.", "la direttrice"),
+        )
+        for text, holder in cases:
+            with self.subTest(text=text):
+                graph = build_graph([document(text, (("Lea Blu", "PERSON"),))])
+                nodes = {node["id"]: node for node in graph["nodes"]}
+                edge, = [edge for edge in graph["edges"] if edge["type"] == "EXPLICIT_RELATION"]
+                self.assertEqual(nodes[edge["source"]]["name"], holder)
 
     def test_cooccurrence_and_negation_do_not_create_a_relation(self):
         text = "Erano presenti Lea Blu e Ada Neri. Lea Blu non è la direttrice della società Alfa."

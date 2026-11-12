@@ -26,6 +26,9 @@ class RelationReviewTests(unittest.TestCase):
             ("Lea Blu, dipendente del Comune di Roma.", "Lea Blu", "Comune di Roma", "COMPANY"),
             ("Lea Blu, difensore di uno dei due imputati.", "Lea Blu", "uno dei due imputati", "COMPANY"),
             ("Lea Blu non lavora presso una farmacia.", "Lea Blu", "una farmacia", "COMPANY"),
+            ("Lea Blu era titolare di una speciﬁca posizione di garanzia.",
+             "Lea Blu", "una specifica posizione di garanzia", "COMPANY"),
+            ("Lea Blu, titolare del servizio sharing Alfa.", "Lea Blu", "servizio sharing Alfa", "COMPANY"),
         ]
         for text, person, other, label in cases:
             with self.subTest(text=text):
@@ -37,6 +40,21 @@ class RelationReviewTests(unittest.TestCase):
                 }
                 result = parse_relation_review(json.dumps({"relations": [proposal]}), passage)
                 self.assertEqual(result["status"], "invalid_response")
+
+    def test_qualified_legal_cue_keeps_the_client_span_and_its_number(self):
+        for qualifier in ("fiducia", "ﬁducia"):
+            with self.subTest(qualifier=qualifier):
+                text = f"Lea Blu, difensore di {qualifier} di A.A., conosce Ada Neri, dipendente della ditta Alfa."
+                passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text)}
+                proposal = {"source": {"text": "Lea Blu", "label": "PERSON", "kind": "name"}, "cue": 1,
+                            "target": {"text": "A.A.", "label": "PERSON", "kind": "name"}}
+                result = parse_relation_review(json.dumps({"relations": [proposal]}), passage)
+                relation, = result["relations"]
+                self.assertEqual(relation["target"]["start"], text.index("A.A."))
+                self.assertEqual(relation["predicate_start"], text.index("difensore"))
+                proposal["cue"] = 2
+                self.assertEqual(parse_relation_review(json.dumps({"relations": [proposal]}), passage)["status"],
+                                 "invalid_response")
 
     def test_two_roles_can_share_an_explicit_company(self):
         text = 'Claudio (amministratore \nunico e poi liquidatore della società "Sigimet s.r.l.")'
