@@ -159,7 +159,7 @@ def main() -> None:
             result = {"id": document["id"], "text": document["text"]}
             # Copy provenance only; any input annotations are excluded.
             for key in ("document", "page", "pages", "source", "start", "end", "source_file", "source_sha256",
-                        "article_id", "url", "title", "crime_category", "publication_date", "event_date",
+                        "case_id", "article_id", "url", "title", "crime_category", "publication_date", "event_date",
                         "synthetic", "language", "template_id", "source_revision", "source_url", "source_line"):
                 if key in document:
                     result[key] = document[key]

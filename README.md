@@ -74,11 +74,11 @@ The downloader retrieves and checks the source files listed in [`configs/data_so
 
 ## Run on Google Colab
 
-1. Open the **[rules and spaCy notebook](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/rules_and_spacy_ner_colab.ipynb)** in a CPU runtime. Upload the verified `documents.json` to `/content/` or let the notebook prepare the registered sources. Run extraction with run number `05` and download `05_ner_baseline.json`.
-2. Open the **[perplexity and LLM review notebook](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/perplexity_llm_review_colab.ipynb)** in a T4 GPU runtime. Upload `05_ner_baseline.json` to `/content/`. Enable the `HF_TOKEN` Colab Secret with a Hugging Face read token that has access to `sapienzanlp/Minerva-350M-base-v1.0`.
-3. Set `run_corpus = True` to produce `05_ner_corpus.json`. Then set `run_relations = True` in the next section to produce `05_relation_plan.json` and `05_relation_reviews.json` on the same T4. Download all three files. The reference evaluation sections are optional.
+1. Open the **[end-to-end notebook](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/forensic_llm_graph_colab.ipynb)** in a T4 GPU runtime. Enable the `HF_TOKEN` Colab Secret with a Hugging Face read token that has access to `sapienzanlp/Minerva-350M-base-v1.0`.
+2. Upload the prepared `data/processed/documents.json` to `/content/`. Keep run number `05` for the 10,654-document corpus and choose **Runtime → Run all**. The notebook installs the dependencies and runs rules and spaCy on CPU, Minerva and Qwen on GPU, then builds the graph in the same session. Allow time for the initial model downloads.
+3. Download `/content/05_run.zip` from the Files panel and extract the five JSON files into local `outputs/`. The archive contains the NER baseline, hybrid NER results, relation review plan, Qwen reviews and `05_relation_graph.json`.
 
-The notebooks clone the repository, install the dependencies and download the model files into the runtime. Allow additional time for the initial model downloads.
+If execution is interrupted and the runtime still has its files, run the notebook again with the same number to reuse completed stages and resume hybrid NER from its checkpoint. An interrupted relation review starts from the saved plan. Use a new numeric prefix for a new run.
 
 ### Command-line equivalents
 
@@ -96,7 +96,7 @@ The first pass runs on CPU. The hybrid command requires CUDA and access to Miner
 
 ### Evaluate saved results
 
-Use the optional evaluation sections in the second notebook with the first-pass JSON, saved hybrid predictions and matching annotations. Scoring saved predictions runs on CPU without a Hugging Face token. To generate predictions for a new annotated comparison, set `run_reference_evaluation = True` and `generate_reference_predictions = True` in the second notebook on a T4 runtime. The notebook evaluates the same passages under both selection strategies.
+Use `scripts/evaluate.py` with a first-pass JSON, saved reference predictions and matching reviewed annotations. Scoring saved predictions runs on CPU. To generate predictions for a new annotated comparison, use `scripts/run_hybrid.py` with `--reference` and `--compare-routing` on a CUDA runtime. Both routing strategies use the same passage budget. The original experiment notebooks are available in Git history.
 
 <details>
 <summary>Example reference JSON</summary>
@@ -168,7 +168,7 @@ The full run checked how the pipeline operates when passages from the entire cor
 
 The global selection did not include any of the 12 annotated test excerpts, so their precision, recall and F1 remained at the baseline values in the table. The full run demonstrates execution at corpus scale. The quality comparison comes from the separately annotated test excerpts, and the accuracy of the 100 globally selected passages remains unmeasured.
 
-The reported comparisons use a saved first-pass result from commit [`59ddcfe`](https://github.com/AntoFratta/forensic-llm-graph/commit/59ddcfe77dfd4f03beb3801e8088d049a07c9e0c) and the hybrid method from commit [`b20a42b`](https://github.com/AntoFratta/forensic-llm-graph/commit/b20a42ba6620948c0f881bdcc2181aabb232e93b). Recalculating the exact scores from those runs requires the saved first-pass and hybrid predictions and the reviewed reference. Running the notebooks from the current checkout generates new predictions.
+The reported comparisons use a saved first-pass result from commit [`59ddcfe`](https://github.com/AntoFratta/forensic-llm-graph/commit/59ddcfe77dfd4f03beb3801e8088d049a07c9e0c) and the hybrid method from commit [`b20a42b`](https://github.com/AntoFratta/forensic-llm-graph/commit/b20a42ba6620948c0f881bdcc2181aabb232e93b). Recalculating the exact scores from those runs requires the saved first-pass and hybrid predictions and the reviewed reference. Running the pipeline from the current checkout generates new predictions.
 
 ## Build and evaluate the relation graph
 
@@ -186,9 +186,10 @@ To add Qwen proposals, prepare a review plan. Supplying `--reference` limits the
 python scripts/review_relation_graph.py prepare --input outputs/hybrid_corpus.json --reference outputs/02_relation_reference.json --output outputs/02_relation_plan.json
 ```
 
-Run the review in the full-corpus notebook or upload the plan to the standalone [relation review notebook](notebooks/qwen_relation_review_colab.ipynb). The builder checks that the review belongs to the same NER input. The validator locates the quoted endpoints in the original text and checks their attachment to the chosen predicate and their direction.
+The [end-to-end notebook](notebooks/forensic_llm_graph_colab.ipynb) runs the corpus review and builds the graph. To run Qwen with an existing plan, use the `run` subcommand on a CUDA runtime. The builder checks that the review belongs to the same NER input. The validator locates the quoted endpoints in the original text and checks their attachment to the chosen predicate and their direction.
 
 ```bash
+python scripts/review_relation_graph.py run --plan outputs/02_relation_plan.json --output outputs/02_relation_reviews.json
 python scripts/build_relation_graph.py --input outputs/hybrid_corpus.json --relation-reviews outputs/02_relation_reviews.json --output outputs/02_relation_graph_qwen.json
 ```
 
@@ -206,7 +207,7 @@ python scripts/evaluate_relation_graph.py --graph outputs/02_relation_graph_qwen
 | [`configs/`](configs/) | Data sources, model revisions and routing settings |
 | [`scripts/`](scripts/) | Data preparation, extraction and evaluation entry points |
 | [`src/`](src/) | Entity rules, passage construction, model loading, validation and scoring |
-| [`notebooks/`](notebooks/) | Colab workflows |
+| [`notebooks/`](notebooks/) | End-to-end Colab notebook |
 | [`tests/`](tests/) | Automated tests |
 
 Run the tests with `python -m unittest discover -s tests`.

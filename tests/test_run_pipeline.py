@@ -21,7 +21,7 @@ class PipelineTests(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.documents = [
             {"id": "one", "text": "Email: anna@example.org", "source": "example",
-             "annotations": [{"label": "SHOULD_NOT_BE_USED"}]},
+             "case_id": "case-one", "annotations": [{"label": "SHOULD_NOT_BE_USED"}]},
             {"id": "two", "text": "Data 5/15/21", "source": "example"},
         ]
         self.input_path = self.directory / "documents.json"
@@ -55,6 +55,7 @@ class PipelineTests(unittest.TestCase):
         self.nlp.assert_not_called()
         self.assertEqual(self.nlp.pipe.call_args.kwargs, {"batch_size": 8})
         self.assertEqual([row["id"] for row in result["documents"]], ["one", "two"])
+        self.assertEqual(result["documents"][0]["case_id"], "case-one")
         self.assertEqual(result["run"]["spacy_pipeline"], ["morphologizer", "ner"])
         self.assertEqual(result["run"]["spacy_batch_size"], 8)
         self.assertEqual(result["run"]["document_count"], 2)
