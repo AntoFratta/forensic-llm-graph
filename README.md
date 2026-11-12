@@ -1,6 +1,6 @@
 # Forensic LLM Graph
 
-This master's thesis project studies named entity recognition (NER) in Italian forensic and legal texts. It tests whether a language model can improve the results of rules and spaCy by reviewing selected passages, and whether perplexity helps choose those passages. Relation extraction and graph construction are planned for a later stage.
+This master's thesis project studies named entity recognition (NER) in Italian forensic and legal texts. It tests whether a language model can improve the results of rules and spaCy by reviewing selected passages, and whether perplexity helps choose those passages. A second stage uses the saved NER results to build a graph of people, companies and documents with links back to the original text.
 
 ## How it works
 
@@ -166,6 +166,35 @@ The full run checked how the pipeline operates when passages from the entire cor
 The global selection did not include any of the 12 annotated test excerpts, so their precision, recall and F1 remained at the baseline values in the table. The full run demonstrates execution at corpus scale. The quality comparison comes from the separately annotated test excerpts, and the accuracy of the 100 globally selected passages remains unmeasured.
 
 The reported comparisons use a saved first-pass result from commit [`59ddcfe`](https://github.com/AntoFratta/forensic-llm-graph/commit/59ddcfe77dfd4f03beb3801e8088d049a07c9e0c) and the hybrid method from commit [`b20a42b`](https://github.com/AntoFratta/forensic-llm-graph/commit/b20a42ba6620948c0f881bdcc2181aabb232e93b). Recalculating the exact scores from those runs requires the saved first-pass and hybrid predictions and the reviewed reference. Running the notebooks from the current checkout generates new predictions.
+
+## Build and evaluate the relation graph
+
+The graph has document nodes and subject nodes for people and companies. It records where a subject is mentioned, where two subjects occur in the same passage, and where the text states a directed relationship. The explicit extractor covers selected expressions of employment, roles and legal representation. Every edge stores evidence offsets in the input document. Subject names are grouped within each document by normalised spelling and label. [Graph construction](src/relation_graph.py) · [Relation patterns](src/explicit_relations.py)
+
+Build the rules-based graph from saved NER results. Use an output name that identifies the run.
+
+```bash
+python scripts/build_relation_graph.py --input outputs/hybrid_corpus.json --output outputs/relation_graph_rules_RUN_ID.json
+```
+
+To add Qwen proposals, prepare a review plan. Supplying `--reference` limits the plan to eligible excerpts from a saved evaluation sample. The plan uses the excerpt text and offsets. For a corpus run, omit `--reference` and set the passage budget with `--max-passages`.
+
+```bash
+python scripts/review_relation_graph.py prepare --input outputs/hybrid_corpus.json --reference outputs/relation_reference_RUN_ID.json --output outputs/relation_plan_RUN_ID.json
+```
+
+Upload the plan to the [relation review notebook](notebooks/qwen_relation_review_colab.ipynb) on a Colab T4 runtime. Download the review JSON and use its generated filename in the build command. The builder verifies that the review belongs to the same NER input and resolves the proposed quotations against the original text.
+
+```bash
+python scripts/build_relation_graph.py --input outputs/hybrid_corpus.json --relation-reviews outputs/relation_reviews_RUN_ID.json --output outputs/relation_graph_qwen_RUN_ID.json
+```
+
+Score each graph against the same reviewed reference. The scorer counts a relation as correct when the direction, endpoint labels, and all three spans match exactly.
+
+```bash
+python scripts/evaluate_relation_graph.py --graph outputs/relation_graph_rules_RUN_ID.json --reference outputs/relation_reference_RUN_ID.json --output outputs/relation_evaluation_rules_RUN_ID.json
+python scripts/evaluate_relation_graph.py --graph outputs/relation_graph_qwen_RUN_ID.json --reference outputs/relation_reference_RUN_ID.json --output outputs/relation_evaluation_qwen_RUN_ID.json
+```
 
 ## Repository layout
 
