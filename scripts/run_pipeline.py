@@ -97,11 +97,6 @@ def summarize_sources(documents: list) -> dict:
 
 
 def main() -> None:
-    """Validate settings, load the model once, extract candidates and save results.
-
-    --rules-only overrides model use and is recorded in the output metadata.
-    Existing output files require explicit permission through --overwrite.
-    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/baseline.json")
     parser.add_argument("--output", help="Use a different output path for this run.")
@@ -148,7 +143,7 @@ def main() -> None:
 
         results = []
         started = time.perf_counter()
-        # Consume Docs as they are produced instead of retaining the entire NLP corpus.
+        # Process each spaCy batch as it arrives to limit memory use.
         parsed_documents = (
             nlp.pipe((document["text"] for document in documents), batch_size=batch_size)
             if use_spacy else repeat(None, len(documents))
@@ -157,7 +152,7 @@ def main() -> None:
             print(f"Processing with spaCy batches of {batch_size}...", flush=True)
         for number, (document, doc) in enumerate(zip(documents, parsed_documents, strict=True), start=1):
             result = {"id": document["id"], "text": document["text"]}
-            # Copy provenance only; any input annotations are excluded.
+            # Use an explicit list to keep source provenance separate from annotations.
             for key in ("document", "page", "pages", "source", "start", "end", "source_file", "source_sha256",
                         "case_id", "article_id", "url", "title", "crime_category", "publication_date", "event_date",
                         "synthetic", "language", "template_id", "source_revision", "source_url", "source_line"):

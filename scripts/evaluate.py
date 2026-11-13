@@ -22,7 +22,8 @@ from src.llm_filter import merge_reviews, parse_review
 from src.passages import build_passages, select_passages
 
 
-# The published runner added input and checkpoint checks without changing inference or routing.
+# The saved held-out run predates input and checkpoint validation in the runner.
+# This pair records the original fingerprint and the verified compatible revision.
 COMPATIBLE_EVALUATION_CODE_HASHES = (
     "ff6db752bfb62265a56982b217c2a33755d81e67b72d854b98f55dd6ec53de4e",
     "584b73f513f40f2895099039dfcfc12f6336b5aa7d7a4c1d9f66f61e857f890c",
@@ -139,7 +140,7 @@ def replay_validation(hybrid: dict, documents: list) -> dict:
             "review_status_after": dict(Counter(r["status"] for r in reviews.values()))}
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference", required=True)
     parser.add_argument("--baseline", required=True, help="Recorded first-pass JSON.")

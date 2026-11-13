@@ -81,7 +81,7 @@ def read_redit(path: Path, raw_dir: Path) -> tuple[dict, dict]:
         if not offsets:
             raise ValueError(f"Invalid token offsets in {path.name}, line {number}")
         start, end = map(int, offsets.groups())
-        # WebAnno escapes reserved characters; annotation fields remain untouched.
+        # Decode the token to recover the character count recorded by WebAnno.
         text = re.sub(r"\\([\\|_\[\]*])", r"\1", columns[2])
         if start < previous_end or end <= start or len(text) != end - start:
             raise ValueError(f"Inconsistent token offsets in {path.name}, line {number}")
@@ -347,7 +347,6 @@ def main() -> None:
         else:
             print("Synthetic banking subset not present; this collection was not included.")
 
-        # Counts describe preparation coverage, not NER performance or text quality.
         report = {
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "raw_directory": str(raw_dir),

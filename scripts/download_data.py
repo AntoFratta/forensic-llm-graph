@@ -44,6 +44,7 @@ def reusable(path: Path, expected_hash: str, overwrite: bool) -> bool:
 
 
 def target_path(raw_dir: Path, filename: str) -> Path:
+    """Resolve a plain filename within its assigned data directory."""
     if not filename or Path(filename).name != filename or filename in {".", ".."}:
         raise ValueError("Source filenames must not contain directory components.")
     path = (raw_dir / filename).resolve()
@@ -63,7 +64,6 @@ def download_file(source: dict, raw_dir: Path, overwrite: bool) -> Path:
     try:
         with tempfile.NamedTemporaryFile(dir=raw_dir, prefix="download_", suffix=".part", delete=False) as stream:
             temporary = Path(stream.name)
-            # Default HTTPS certificate validation remains enabled.
             with urlopen(source["url"], timeout=60) as response:
                 while block := response.read(1024 * 1024):
                     stream.write(block)

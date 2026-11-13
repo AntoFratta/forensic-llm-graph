@@ -168,36 +168,55 @@ The full run checked how the pipeline operates when passages from the entire cor
 
 The global selection did not include any of the 12 annotated test excerpts, so their precision, recall and F1 remained at the baseline values in the table. The full run demonstrates execution at corpus scale. The quality comparison comes from the separately annotated test excerpts, and the accuracy of the 100 globally selected passages remains unmeasured.
 
-The reported comparisons use a saved first-pass result from commit [`59ddcfe`](https://github.com/AntoFratta/forensic-llm-graph/commit/59ddcfe77dfd4f03beb3801e8088d049a07c9e0c) and the hybrid method from commit [`b20a42b`](https://github.com/AntoFratta/forensic-llm-graph/commit/b20a42ba6620948c0f881bdcc2181aabb232e93b). Recalculating the exact scores from those runs requires the saved first-pass and hybrid predictions and the reviewed reference. Running the pipeline from the current checkout generates new predictions.
+The reported comparisons use a saved first-pass result from commit [`59ddcfe`](https://github.com/AntoFratta/forensic-llm-graph/commit/59ddcfe77dfd4f03beb3801e8088d049a07c9e0c) and the hybrid method from commit [`b20a42b`](https://github.com/AntoFratta/forensic-llm-graph/commit/b20a42ba6620948c0f881bdcc2181aabb232e93b). To recompute the held-out scores on CPU, use `scripts/evaluate.py` from `b20a42b` with the saved `01_ner_baseline.json`, `03_ner_test.json` and the reviewed test reference. The evaluator checks the fingerprint of the pipeline that produced the predictions.
+
+### Final corpus run 05
+
+Run `05` processed **10,654 documents** and scored **28,907 passages** with Minerva. Qwen reviewed 100 passages for NER, of which 81 had fully usable responses, 18 had partially usable responses and one had an unusable response. The hybrid pass changed entity spans or labels in 29 documents. The global selection included zero of the 12 annotated test excerpts. Both the new baseline and the full-corpus hybrid output scored **63.24% F1** on those excerpts.
 
 ## Build and evaluate the relation graph
 
-The graph has document nodes and subject nodes for people and companies. It records where a subject is mentioned, where two subjects occur in the same passage, and where the text states a directed relationship. The explicit extractor covers selected expressions of employment, roles and legal representation. Every edge stores evidence offsets in the input document. Subject names are grouped within each document by normalised spelling and label. Explicit public bodies and person descriptions are screened out of the COMPANY label. [Graph construction](src/relation_graph.py) · [Relation patterns](src/explicit_relations.py)
+The graph has document nodes and subject nodes for people and companies. It records where a subject is mentioned, where two subjects occur in the same passage, and where the text states a directed relationship. The explicit extractor covers selected expressions of employment, roles and legal representation. Every edge stores evidence offsets in the input document. Subject names are grouped within each document by normalised spelling and label. `COMPANY` covers businesses and commercial operators described in the text, including when their legal form is unspecified. Public bodies, associations and person descriptions are outside this category. [Graph construction](src/relation_graph.py) · [Relation patterns](src/explicit_relations.py)
 
-Build the rules-based graph from saved NER results. Use the same short numeric prefix for the plan, graph and evaluation files from one experiment.
+### Reproduce the final graph on CPU
+
+The final graph is `outputs/06_relation_graph.json`. From the repository root, run the following commands with `05_ner_corpus.json` and `05_relation_reviews.json` from the saved Colab run. They build the rules-only comparison and revalidate the saved Qwen responses on CPU. Both variants use the same NER predictions. Use a new output filename when preserving an existing file.
 
 ```bash
-python scripts/build_relation_graph.py --input outputs/hybrid_corpus.json --output outputs/02_relation_graph_rules.json
+python scripts/graph.py build --input outputs/05_ner_corpus.json --output outputs/06_relation_graph_rules.json
+python scripts/graph.py build --input outputs/05_ner_corpus.json --relation-reviews outputs/05_relation_reviews.json --revalidate-reviews --output outputs/06_relation_graph.json
 ```
 
-To add Qwen proposals, prepare a review plan. Supplying `--reference` limits the plan to eligible excerpts from a saved evaluation sample. For a corpus run, omit `--reference` and set the passage budget with `--max-passages`. The corpus plan reserves half the slots for eligible judicial passages, giving each case with a recorded ID an initial turn and using the document ID when the case ID is unavailable. Remaining slots use the deterministic passage order.
+On this snapshot, the rules-only graph has **106 explicit edges** and the graph with Qwen has **117**. The local `outputs/06_results.json` records the input hashes, both counts by source, and evidence for the 11 added edges. The text supports all 11 under the project's annotation criteria. In the Wesport example, the article names the pool operator and its administrator. Its legal form is unspecified. This audit covers the additions. Overall graph precision requires a broader reference.
+
+On the previously annotated 20-excerpt sample, both variants of `06` find **2 of 8** relations with exact direction, labels and spans, with zero extra predictions in those excerpts. All six misses were outside the globally selected Qwen passages. On four judicial excerpts used during development, the rules recover one relation and the graph with Qwen recovers four. These examples were used to refine the method, and their annotations are provisional. Some company names and categories still have boundary or classification errors.
+
+### Run another graph experiment
+
+The following example uses `outputs/hybrid_corpus.json` from the command-line pipeline. Pick an unused numeric prefix for the new outputs.
 
 ```bash
-python scripts/review_relation_graph.py prepare --input outputs/hybrid_corpus.json --reference outputs/02_relation_reference.json --output outputs/02_relation_plan.json
+python scripts/graph.py build --input outputs/hybrid_corpus.json --output outputs/07_relation_graph_rules.json
 ```
 
-The [end-to-end notebook](notebooks/forensic_llm_graph_colab.ipynb) runs the corpus review and builds the graph. To run Qwen with an existing plan, use the `run` subcommand on a CUDA runtime. The builder checks that the review belongs to the same NER input. The validator locates the quoted endpoints in the original text and checks their attachment to the chosen predicate and their direction.
+To add Qwen proposals, prepare a review plan. The corpus plan reserves half the slots for eligible judicial passages. It gives each case an initial turn, using the document ID when a case ID is unavailable. The remaining slots follow a deterministic passage order. To run on annotated excerpts, pass `--reference` with a sample tied to the exact NER input.
 
 ```bash
-python scripts/review_relation_graph.py run --plan outputs/02_relation_plan.json --output outputs/02_relation_reviews.json
-python scripts/build_relation_graph.py --input outputs/hybrid_corpus.json --relation-reviews outputs/02_relation_reviews.json --output outputs/02_relation_graph_qwen.json
+python scripts/graph.py prepare --input outputs/hybrid_corpus.json --max-passages 100 --output outputs/07_relation_plan.json
 ```
 
-Score each graph against the same reviewed reference. The scorer counts a relation as correct when the direction, endpoint labels, and all three spans match exactly.
+Run Qwen on a CUDA runtime, then build the graph. The builder checks the review's input fingerprint. The validator locates the quoted endpoints in the original text and checks their attachment to the predicate and their direction.
 
 ```bash
-python scripts/evaluate_relation_graph.py --graph outputs/02_relation_graph_rules.json --reference outputs/02_relation_reference.json --output outputs/02_relation_results_rules.json
-python scripts/evaluate_relation_graph.py --graph outputs/02_relation_graph_qwen.json --reference outputs/02_relation_reference.json --output outputs/02_relation_results_qwen.json
+python scripts/graph.py review --plan outputs/07_relation_plan.json --output outputs/07_relation_reviews.json
+python scripts/graph.py build --input outputs/hybrid_corpus.json --relation-reviews outputs/07_relation_reviews.json --output outputs/07_relation_graph.json
+```
+
+If you have a matching reviewed reference, score both graphs against it. The scorer requires exact agreement on direction, endpoint labels and all three spans.
+
+```bash
+python scripts/graph.py evaluate --graph outputs/07_relation_graph_rules.json --reference outputs/relation_reference.json --output outputs/07_relation_results_rules.json
+python scripts/graph.py evaluate --graph outputs/07_relation_graph.json --reference outputs/relation_reference.json --output outputs/07_relation_results.json
 ```
 
 ## Repository layout

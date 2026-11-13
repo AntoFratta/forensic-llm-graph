@@ -183,6 +183,49 @@ def write_result(path: Path, result: dict) -> None:
             temporary.unlink()
 
 
+def score_missing_passages(passages: list, settings: dict, scores: dict, models: dict, checkpoint, cuda) -> None:
+    """Score pending passages with Minerva and save each completed score."""
+    pending = [passage for passage in passages if passage["id"] not in scores]
+    if not pending:
+        return
+    print(f"Loading Minerva; {len(pending)} passages to score...", flush=True)
+    model, tokenizer, metadata = load_model(settings, quantized=False)
+    try:
+        for batch in perplexity_batches(pending, settings, model, tokenizer):
+            for passage_id, score in batch.items():
+                scores[passage_id] = score
+                append_record(checkpoint, {"kind": "perplexity", "passage_id": passage_id, "result": score})
+            print(f"Perplexity: {len(scores)}/{len(passages)}", flush=True)
+        metadata["peak_gpu_allocated_bytes"] = cuda.max_memory_allocated()
+        models["perplexity"] = metadata
+        append_record(checkpoint, {"kind": "model", "role": "perplexity", "metadata": metadata})
+    finally:
+        del model, tokenizer
+        release_cuda_memory()
+
+
+def review_missing_passages(selected: list, settings: dict, reviews: dict, models: dict, checkpoint, cuda) -> None:
+    """Run Qwen for selected passages that lack a saved review."""
+    pending = [passage for passage in selected if passage["id"] not in reviews]
+    if not pending:
+        return
+    print(f"Loading Qwen; {len(pending)} passages to review...", flush=True)
+    model, tokenizer, metadata = load_model(settings, quantized=True)
+    try:
+        for passage in pending:
+            passage_id = passage["id"]
+            review = review_passage(passage, settings, model, tokenizer)
+            reviews[passage_id] = review
+            append_record(checkpoint, {"kind": "review", "passage_id": passage_id, "result": review})
+            print(f"LLM: {len(reviews)}/{len(selected)}; {review['status']}; {passage_id}", flush=True)
+        metadata["peak_gpu_allocated_bytes"] = cuda.max_memory_allocated()
+        models["llm"] = metadata
+        append_record(checkpoint, {"kind": "model", "role": "llm", "metadata": metadata})
+    finally:
+        del model, tokenizer
+        release_cuda_memory()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/hybrid.json")
@@ -204,6 +247,8 @@ def main() -> None:
     try:
         config_path = project_path(args.config)
         config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(config, dict):
+            raise ValueError("Configuration must be an object.")
         if args.input:
             config["input_path"] = args.input
         if args.output:
@@ -239,9 +284,14 @@ def main() -> None:
             passages = smoke_sample(passages, config["passages"]["smoke_per_source"], config["passages"]["seed"])
             identifiers = {p["document_id"] for p in passages}
             documents = [document for document in documents if document["id"] in identifiers]
-        scope = ("development_all_review" if args.development_all else
-                 "reference_" + reference["split"] if reference else
-                 "smoke_test" if args.smoke_test else "extended")
+        if args.development_all:
+            scope = "development_all_review"
+        elif reference:
+            scope = f"reference_{reference['split']}"
+        elif args.smoke_test:
+            scope = "smoke_test"
+        else:
+            scope = "extended"
         print(f"Scope: {scope}; {len(passages)}/{full_passage_count} passages; "
               f"{len(documents)}/{len(source['documents'])} documents represented.", flush=True)
         run = {"stage": "hybrid_preparation" if args.prepare_only else "hybrid",
@@ -284,45 +334,23 @@ def main() -> None:
         with checkpoint_path.open("a" if args.resume else "w", encoding="utf-8", newline="\n") as checkpoint:
             if not args.resume:
                 append_record(checkpoint, {"kind": "header", "fingerprint": fingerprint})
-            remaining = [p for p in passages if p["id"] not in scores]
-            if remaining:
-                print(f"Loading Minerva; {len(remaining)} passages to score...", flush=True)
-                model, tokenizer, metadata = load_model(config["perplexity"], quantized=False)
-                try:
-                    for batch in perplexity_batches(remaining, config["perplexity"], model, tokenizer):
-                        for identifier, score in batch.items():
-                            scores[identifier] = score
-                            append_record(checkpoint, {"kind": "perplexity", "passage_id": identifier, "result": score})
-                        print(f"Perplexity: {len(scores)}/{len(passages)}", flush=True)
-                    metadata["peak_gpu_allocated_bytes"] = torch.cuda.max_memory_allocated()
-                    models["perplexity"] = metadata
-                    append_record(checkpoint, {"kind": "model", "role": "perplexity", "metadata": metadata})
-                finally:
-                    del model, tokenizer
-                    release_cuda_memory()
-            routing = (None if args.score_only or args.development_all else
-                       select_passages(passages, scores, config["routing"], args.smoke_test))
-            without_ppl = (select_passages(passages, scores, config["routing"], use_perplexity=False)
-                           if args.compare_routing else None)
-            selected = (passages if args.development_all and not args.score_only else
-                        [] if routing is None else [p for p in passages if routing["decisions"][p["id"]]["selected"]
-                                                  or (without_ppl and without_ppl["decisions"][p["id"]]["selected"])])
-            remaining = [p for p in selected if p["id"] not in reviews]
-            if remaining:
-                print(f"Minerva released. Loading Qwen; {len(remaining)} passages to review...", flush=True)
-                model, tokenizer, metadata = load_model(config["llm"], quantized=True)
-                try:
-                    for passage in remaining:
-                        review = review_passage(passage, config["llm"], model, tokenizer)
-                        reviews[passage["id"]] = review
-                        append_record(checkpoint, {"kind": "review", "passage_id": passage["id"], "result": review})
-                        print(f"LLM: {len(reviews)}/{len(selected)}; {review['status']}; {passage['id']}", flush=True)
-                    metadata["peak_gpu_allocated_bytes"] = torch.cuda.max_memory_allocated()
-                    models["llm"] = metadata
-                    append_record(checkpoint, {"kind": "model", "role": "llm", "metadata": metadata})
-                finally:
-                    del model, tokenizer
-                    release_cuda_memory()
+            score_missing_passages(passages, config["perplexity"], scores, models, checkpoint, torch.cuda)
+
+            routing = without_perplexity = None
+            selected = []
+            if args.development_all and not args.score_only:
+                selected = passages
+            elif not args.score_only:
+                routing = select_passages(passages, scores, config["routing"], args.smoke_test)
+                selected_ids = {key for key, decision in routing["decisions"].items() if decision["selected"]}
+                if args.compare_routing:
+                    # Generate one response per passage selected by either policy.
+                    without_perplexity = select_passages(passages, scores, config["routing"], use_perplexity=False)
+                    selected_ids.update(key for key, decision in without_perplexity["decisions"].items()
+                                        if decision["selected"])
+                selected = [passage for passage in passages if passage["id"] in selected_ids]
+
+            review_missing_passages(selected, config["llm"], reviews, models, checkpoint, torch.cuda)
 
         primary_reviews = ({key: review for key, review in reviews.items() if routing["decisions"][key]["selected"]}
                            if routing else reviews)
@@ -344,12 +372,14 @@ def main() -> None:
                     "candidate_count": sum(len(d["entities"]) for d in merged)})
         detailed = [{**passage, "perplexity": scores[passage["id"]],
                      "routing": routing["decisions"][passage["id"]] if routing else None,
-                     "routing_without_perplexity": without_ppl["decisions"][passage["id"]] if without_ppl else None,
+                     "routing_without_perplexity": (without_perplexity["decisions"][passage["id"]]
+                                                    if without_perplexity else None),
                      "review": reviews.get(passage["id"])} for passage in passages]
         routing_summary = {key: value for key, value in routing.items() if key != "decisions"} if routing else None
+        comparison_summary = ({key: value for key, value in without_perplexity.items() if key != "decisions"}
+                              if without_perplexity else None)
         write_result(output_path, {"run": run, "routing": routing_summary,
-                                   "routing_without_perplexity": {key: value for key, value in without_ppl.items()
-                                                                   if key != "decisions"} if without_ppl else None,
+                                   "routing_without_perplexity": comparison_summary,
                                    "passages": detailed, "documents": merged})
         print(f"Saved {output_path}", flush=True)
     except (OSError, ValueError, RuntimeError, ImportError, KeyError) as exc:
