@@ -4,13 +4,20 @@ A master's thesis project on named entity recognition (NER) and relation extract
 
 [Open the end-to-end notebook in Google Colab](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/forensic_llm_graph_colab.ipynb)
 
+## Quick start
+
+1. [Prepare the corpus](#prepare-the-corpus) locally to generate `data/processed/documents.json`.
+2. [Get access to Minerva](#models-and-access) and add your Hugging Face token to Colab.
+3. [Run the notebook on a T4 GPU](#end-to-end-on-google-colab). Upload only `documents.json`, then download the ZIP containing the NER predictions and relation graph.
+4. [Read the outputs](#read-the-generated-outputs) to locate an edge's evidence in the original document.
+
 ## How the pipeline works
 
 1. **Extract entities.** Rules and Italian spaCy process every document. The ten labels are `PERSON`, `COMPANY`, `ROLE`, `LOCATION`, `EMAIL`, `PHONE`, `TAX_CODE`, `VAT_NUMBER`, `BANK_ACCOUNT` and `TIME`. Banking mentions include IBANs and other account numbers.
-2. **Select and review NER passages.** Minerva scores the perplexity of passages with cores of about 800 characters and up to 160 characters of context on either side. Selection combines perplexity with signals such as overlapping candidates and possible omissions. Qwen reviews up to 20% of passages, rounded up and capped at 100. The pipeline checks proposed labels and spans against the text before merging them with the first pass.
+2. **Select and review NER passages.** Minerva measures how surprising each passage is to the model using perplexity. The passages have cores of about 800 characters and up to 160 characters of context on either side. Selection combines perplexity with signals such as overlapping candidates and possible omissions. The review budget is 20% of passages, rounded up and capped at 100. Qwen reviews the highest-priority eligible passages within that budget. The pipeline checks proposed labels and spans against the text before merging them with the first pass.
 3. **Build the relation graph.** Rules extract explicit relations from the saved NER output. A separate selection of up to 100 passages with relation cues goes to Qwen. The selection reserves half the slots for eligible judicial passages when available, prioritising coverage across cases. The validator checks that the proposed endpoints and direction are supported by the text. [Passage selection](src/passages.py) · [Relation validation](src/relation_review.py)
 
-The graph contains document nodes and subject nodes for people and businesses. `MENTIONED_IN` links a subject to its document. `CO_OCCURS_WITH` links subjects mentioned in the same passage. `EXPLICIT_RELATION` records a directed employment, role or legal representation relation. Each edge carries document-relative character offsets. Subject mentions are grouped within each document. `COMPANY` includes commercial operators whose legal form is unspecified. Public bodies and associations fall outside this category. [Graph construction](src/relation_graph.py) · [Relation patterns](src/explicit_relations.py)
+The graph contains document nodes and subject nodes for people and businesses. `MENTIONED_IN` links a subject to its document. `CO_OCCURS_WITH` records shared context within a passage. `EXPLICIT_RELATION` records a directed employment, role or legal representation relation. Each edge carries zero-based character offsets with exclusive end positions. The same subject can have separate nodes in different documents because grouping is local to each document. `COMPANY` includes commercial operators whose legal form is unspecified. Public bodies and associations fall outside this category. [Graph construction](src/relation_graph.py) · [Relation patterns](src/explicit_relations.py)
 
 ## Corpus and sources
 
@@ -40,15 +47,17 @@ The graph contains document nodes and subject nodes for people and businesses. `
 
 ### Prepare the corpus
 
-Clone the repository and run the following commands from its root with Python 3.10–3.13. Corpus preparation runs on CPU.
+Use Git and Python 3.10–3.13. Run corpus preparation on CPU from a local clone.
 
 ```bash
+git clone https://github.com/AntoFratta/forensic-llm-graph.git
+cd forensic-llm-graph
 python -m pip install pypdf==6.10.0
 python scripts/download_data.py
 python scripts/prepare_data.py
 ```
 
-The downloader checks source files against their recorded SHA-256 hashes and reconstructs the synthetic banking subset from a pinned dataset revision. Preparation reconstructs REDIT text from token offsets, extracts embedded PDF text with page offsets and filters empty and duplicate DICE articles. It writes `data/processed/documents.json`, a preparation report and separate files for source annotations. Existing OCR errors and redactions remain in the extracted text. [Source manifest with download URLs and checksums](configs/data_sources.json)
+The downloader creates `data/raw/`, checks the source files against their recorded SHA-256 hashes and reconstructs the synthetic banking subset from a pinned dataset revision. Preparation reconstructs REDIT text from token offsets, extracts embedded PDF text with page offsets and filters empty and duplicate DICE articles. It writes `data/processed/documents.json`, a preparation report and separate files for source annotations. Existing OCR errors and redactions remain in the extracted text. [Source manifest with download URLs and checksums](configs/data_sources.json)
 
 ## Models and access
 
@@ -66,41 +75,59 @@ The configuration pins the Hugging Face model revisions. [Baseline settings](con
 
 ## Run the project
 
+Start with `data/processed/documents.json` from [Prepare the corpus](#prepare-the-corpus). Each run creates its own predictions, relation reviews and graph. The following examples use `01` as the run prefix.
+
 ### End-to-end on Google Colab
 
 1. Open the notebook, select **Runtime → Change runtime type → T4 GPU** and connect. [Colab notebook](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/forensic_llm_graph_colab.ipynb)
-2. Upload the local `data/processed/documents.json` through the **Files** panel. The notebook reads it from `/content/documents.json`. Enable `HF_TOKEN` as described above.
-3. Choose a two-digit run number. With the default `05`, select **Runtime → Run all**. The notebook installs dependencies and runs both NER passes, the relation review and graph construction in the same session.
-4. Download `/content/05_run.zip` and extract it into local `outputs/`. It contains `05_ner_baseline.json`, `05_ner_corpus.json`, `05_relation_plan.json`, `05_relation_reviews.json` and `05_relation_graph.json`.
+2. Enable the `HF_TOKEN` secret as described in [Models and access](#models-and-access). Upload your generated `data/processed/documents.json` through the **Files** panel. The notebook reads it from `/content/documents.json`.
+3. In the setup cell, change `run_number` to `"01"` to follow the filenames below. Select **Runtime → Run all**. The notebook clones the code, prints the Git revision, installs its dependencies and runs both NER passes, the relation review and graph construction.
+4. Download `/content/01_run.zip` from the **Files** panel. Extract its contents into `outputs/` in your local clone, creating the folder if needed.
 
 If the runtime still holds its files after an interruption, rerun with the same number. Completed stages are reused and the hybrid NER stage can resume from its checkpoint. An interrupted relation review restarts from the saved plan. Use a fresh prefix for a new run.
 
-### Rebuild the final graph on CPU
+### Read the generated outputs
 
-The thesis graph, `06_relation_graph.json`, was built by revalidating the saved `05` relation responses. Use the exact `05_ner_corpus.json` and `05_relation_reviews.json` from that run to reproduce it. The commands also build the rules-only comparison from the same NER input. Choose unused output paths for an additional copy.
+The filenames below are for run `01`. They share the prefix selected in the notebook.
+
+| File | Contents |
+| --- | --- |
+| `01_ner_baseline.json` | Document text and entity candidates from rules and spaCy |
+| `01_ner_corpus.json` | Merged NER predictions, passage scores and review decisions |
+| `01_relation_plan.json` | Passages selected for relation review |
+| `01_relation_reviews.json` | Saved Qwen responses and validation statuses |
+| `01_relation_graph.json` | Nodes and edges with text evidence |
+
+Open `01_relation_graph.json` to inspect the `nodes` and `edges` arrays. Each edge's `source` and `target` are node IDs. To read a supporting passage, take an entry from the edge's `evidence` array, find its `document_id` in the `documents` array of `01_ner_corpus.json`, then read `text[start:end]` using the evidence offsets. Explicit edges also record offsets for both mentions and the predicate.
+
+### Build a graph from saved predictions on CPU
+
+Run these commands from the repository root after generating or extracting the files above. The first command uses graph rules on the saved NER predictions. The second uses those same predictions and the Qwen relation responses from that run. Both commands run on CPU without model weights or a Hugging Face token. Use the Git revision printed in the Colab setup output, or a revision with the same graph code. Choose unused output filenames.
 
 ```bash
-python scripts/graph.py build --input outputs/05_ner_corpus.json --output outputs/06_relation_graph_rules.json
-python scripts/graph.py build --input outputs/05_ner_corpus.json --relation-reviews outputs/05_relation_reviews.json --revalidate-reviews --output outputs/06_relation_graph.json
+python scripts/graph.py build --input outputs/01_ner_corpus.json --output outputs/01_relation_graph_rules.json
+python scripts/graph.py build --input outputs/01_ner_corpus.json --relation-reviews outputs/01_relation_reviews.json --output outputs/01_relation_graph_rebuilt.json
 ```
 
 <details>
-<summary>Command-line inference and evaluation</summary>
+<summary>Run the pipeline from the command line</summary>
 
-For inference, first prepare the corpus, install `requirements.txt` and set `HF_TOKEN` in the environment. The hybrid stage and `graph.py review` require a CUDA GPU. The other commands below run on CPU. Use an unused prefix for the outputs.
+After preparing the corpus, install the dependencies from the repository root and set `HF_TOKEN` in your shell environment. `run_hybrid.py` and `graph.py review` require a CUDA GPU. Entity candidate extraction, relation planning and graph building run on CPU. Change the prefix if you already used `01` in Colab.
 
 ```bash
 python -m pip install -r requirements.txt
-python scripts/run_pipeline.py --output outputs/07_ner_baseline.json
-python scripts/run_hybrid.py --input outputs/07_ner_baseline.json --output outputs/07_ner_corpus.json
-python scripts/graph.py prepare --input outputs/07_ner_corpus.json --output outputs/07_relation_plan.json
-python scripts/graph.py review --plan outputs/07_relation_plan.json --output outputs/07_relation_reviews.json
-python scripts/graph.py build --input outputs/07_ner_corpus.json --relation-reviews outputs/07_relation_reviews.json --output outputs/07_relation_graph.json
+python scripts/run_pipeline.py --output outputs/01_ner_baseline.json
+python scripts/run_hybrid.py --input outputs/01_ner_baseline.json --output outputs/01_ner_corpus.json
+python scripts/graph.py prepare --input outputs/01_ner_corpus.json --output outputs/01_relation_plan.json
+python scripts/graph.py review --plan outputs/01_relation_plan.json --output outputs/01_relation_reviews.json
+python scripts/graph.py build --input outputs/01_ner_corpus.json --relation-reviews outputs/01_relation_reviews.json --output outputs/01_relation_graph.json
 ```
 
-Use `scripts/evaluate.py --help` for NER scoring and `scripts/graph.py evaluate --help` for relation scoring. Both require matching reviewed reference annotations. To generate a controlled NER comparison, use `run_hybrid.py --reference` with `--compare-routing`, then pass the baseline and reference-specific hybrid output to `evaluate.py`. The historical NER scores can be recomputed with the saved baseline, test predictions and reviewed reference using the evaluator from the experiment commit. [Historical NER revision](https://github.com/AntoFratta/forensic-llm-graph/commit/b20a42ba6620948c0f881bdcc2181aabb232e93b)
-
 </details>
+
+### Evaluate your run
+
+Provide your own human-reviewed reference JSON for the same documents and text offsets. For NER, `evaluate.py` can score the baseline directly. For a controlled hybrid comparison, use `run_hybrid.py --reference` with `--compare-routing` to generate predictions for that reference, then pass them to `evaluate.py` with `--hybrid`. For relations, use `graph.py evaluate` with the graph and a reviewed relation reference tied to its NER input. The scorers run on CPU. Use `--help` on either scoring command for its full arguments. [NER reference and scoring code](src/evaluation.py) · [Relation scoring code](scripts/graph.py)
 
 ## Experimental results
 
@@ -114,9 +141,9 @@ Use `scripts/evaluate.py --help` for NER scoring and `scripts/graph.py evaluate 
 
 **Full-corpus NER, run `05`.** Minerva scored 28,907 passages. Qwen returned 81 fully usable responses, 18 partially usable responses and one unusable response across 100 passages. The hybrid pass changed predictions in 29 documents. None of the 12 reviewed test excerpts was selected at corpus scale, and both the baseline and the hybrid output scored 63.24% micro F1 on those excerpts.
 
-**Final relation graph, version `06`.** The graph contains 10,654 document nodes, 38,081 subject nodes, 54,808 co-occurrence edges and 117 explicit edges. The rules-only variant produces 106 explicit edges on the same NER input. Inspection of the 11 added edges found textual support for each under the project's annotation criteria. On the historical 20-excerpt sample, both variants match 2 of 8 annotated relations exactly and produce no extra matches. The six missed relations were outside the passages selected for Qwen. The overall precision of the graph remains unmeasured.
+**Relation graph, experiment `06`.** The experiment revalidated the saved Qwen relation responses from run `05`. The resulting graph contains 10,654 document nodes, 38,081 subject nodes, 54,808 co-occurrence edges and 117 explicit edges. The rules-only variant produced 106 explicit edges on the same NER input. Inspection of the 11 added edges found textual support for each under the project's annotation criteria. On a 20-excerpt diagnostic sample, both variants matched 2 of 8 annotated relations exactly with zero false positives. The six missed relations were outside the passages selected for Qwen. Overall graph precision remains unmeasured.
 
-The local thesis report, `outputs/06_results.json`, records artifact hashes, detailed metrics and examples. The corpus is dominated by news articles, and the available annotated samples cover few judicial cases.
+News articles make up about 97% of the corpus, and the annotated samples cover few judicial cases. These figures summarise recorded experiments. Their prediction files, reviewed references and detailed reports are held in the local research workspace and are excluded from Git. [Historical NER revision](https://github.com/AntoFratta/forensic-llm-graph/commit/b20a42ba6620948c0f881bdcc2181aabb232e93b)
 
 ## Repository layout
 
@@ -128,4 +155,4 @@ The local thesis report, `outputs/06_results.json`, records artifact hashes, det
 | [`configs/`](configs/) | Source manifest, model revisions and experiment settings |
 | [`tests/`](tests/) | Automated tests. Run with `python -m unittest discover -s tests` |
 
-Git tracks code, configuration and documentation. Raw sources, prepared documents, reviewed references and generated results are stored locally. A fresh clone can rebuild the corpus and run the pipeline from the public sources above. Reproducing the reported evaluations requires the matching saved predictions and reviewed references.
+The scripts create `data/raw/`, `data/processed/` and `outputs/` as needed. These directories are excluded from Git.
