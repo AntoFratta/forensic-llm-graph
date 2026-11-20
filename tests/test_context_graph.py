@@ -101,6 +101,20 @@ class ContextGraphTests(unittest.TestCase):
         self.assertEqual(text[fact["predicate_start"]:fact["predicate_end"]], "ha accompagnato")
         self.assertEqual(parse_context_review(response + " testo", passage)["status"], "invalid_response")
 
+    def test_binary_decision_distinguishes_a_rejected_action_from_a_supported_one(self):
+        text = "La polizia ha denunciato un 30enne per furto."
+        doc = document("a", text)
+        passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text),
+                   "context_mentions": context_mentions(doc)}
+        denied = parse_context_review('{"role_response":null,"action_responses":["0"]}', passage)
+        accepted = parse_context_review('{"role_response":null,"action_responses":["1"]}', passage)
+        missing = parse_context_review('{"role_response":null,"action_responses":[]}', passage)
+        self.assertEqual((denied["status"], denied["facts"]), ("ok", []))
+        fact, = accepted["facts"]
+        self.assertEqual(fact["arguments"]["subject"]["text"], "La polizia")
+        self.assertEqual(fact["arguments"]["object"]["text"], "un 30enne")
+        self.assertEqual(missing["status"], "invalid_response")
+
     def test_age_description_ends_before_the_reason_for_the_report(self):
         doc = document("a", "La polizia ha denunciato un 30enne per furto.")
         mentions = context_mentions(doc)
@@ -151,7 +165,7 @@ class ContextGraphTests(unittest.TestCase):
     def test_saved_context_review_replays_as_a_new_fact(self):
         text = "Maria Rossi ha accompagnato Luca Bianchi a Roma."
         doc = document("a", text, [("Maria Rossi", "PERSON"), ("Luca Bianchi", "PERSON"), ("Roma", "LOCATION")])
-        response = json.dumps({"relations": [], "facts": [1]})
+        response = json.dumps({"role_response": None, "action_responses": ["1"]})
 
         def reviewed(passage, *_):
             status = parse_context_review(response, passage)["status"]
@@ -180,7 +194,8 @@ class ContextGraphTests(unittest.TestCase):
         text = "Maria Rossi ha accompagnato Luca Bianchi."
         mentions = [("Maria Rossi", "PERSON"), ("Luca Bianchi", "PERSON")]
         docs = [document("a", text, mentions), document("b", text, mentions)]
-        failure = {"status": "invalid_response", "raw_response": "invalid", "attempts": []}
+        empty_review = {"status": "ok", "raw_response": '{"role_response":null,"action_responses":["0"]}',
+                        "attempts": [], "accepted_count": 0}
         with TemporaryDirectory() as directory:
             root = Path(directory)
             ner, plan, checkpoint = (root / name for name in ("ner.json", "plan.json", "partial.json"))
@@ -188,16 +203,16 @@ class ContextGraphTests(unittest.TestCase):
             plan.write_text(json.dumps(prepare(ner, None, 2, context=True)), encoding="utf-8")
             config = Path(__file__).resolve().parents[1] / "configs/hybrid.json"
             with patch("scripts.graph.load_model", return_value=(None, None, {})), patch(
-                "scripts.graph.review_relations", return_value=failure,
+                "scripts.graph.review_relations", return_value=empty_review,
             ) as review:
                 with self.assertRaisesRegex(RuntimeError, "first 1 passages"):
                     run_review(plan, config, checkpoint_path=checkpoint, check_first=1)
                 self.assertEqual(review.call_count, 1)
                 saved = json.loads(checkpoint.read_text(encoding="utf-8"))
-                self.assertEqual(saved["run"]["statuses"], {"invalid_response": 1})
+                self.assertEqual(saved["run"]["statuses"], {"ok": 1})
                 result = run_review(plan, config, checkpoint_path=checkpoint)
                 self.assertEqual(review.call_count, 2)
-                self.assertEqual(result["run"]["statuses"], {"invalid_response": 2})
+                self.assertEqual(result["run"]["statuses"], {"ok": 2})
 
 
 if __name__ == "__main__":

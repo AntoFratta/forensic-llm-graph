@@ -125,8 +125,8 @@ def run_review(plan_path: Path, config_path: Path, *, checkpoint_path: Path | No
 
     def check_initial_reviews() -> None:
         if (initial_count and len(reviews) >= initial_count
-                and all(row["status"] not in {"ok", "partial"} for row in reviews[:initial_count])):
-            raise RuntimeError(f"Qwen returned no usable response in the first {initial_count} passages. "
+                and not any(row.get("accepted_count", 0) for row in reviews[:initial_count])):
+            raise RuntimeError(f"No Qwen proposal was accepted in the first {initial_count} passages. "
                                f"Partial reviews: {checkpoint_path}.")
 
     check_initial_reviews()
@@ -297,7 +297,7 @@ def main() -> None:
     review.add_argument("--plan", required=True)
     review.add_argument("--config", default="configs/hybrid.json")
     review.add_argument("--check-first", type=int, default=0,
-                        help="Stop if none of the initial passages has a usable model response.")
+                        help="Stop if none of the initial passages produces a supported model proposal.")
     review.add_argument("--output", required=True)
 
     build = commands.add_parser("build", help="Build the graph from saved predictions on CPU.")
