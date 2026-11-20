@@ -5,10 +5,10 @@ import unittest
 from unittest.mock import patch
 
 from scripts.graph import build_saved_graph, prepare, run_review
-from src.context_facts import context_mentions
+from src.context_facts import context_mentions, reviewable_facts
 from src.graph_queries import inspect_graph, score_context
 from src.relation_graph import build_graph
-from src.relation_review import parse_context_review, select_context_passages
+from src.relation_review import _fact_reference, parse_context_review, parse_relation_review, select_context_passages
 
 
 def document(identifier, text, mentions=(), **metadata):
@@ -55,6 +55,89 @@ class ContextGraphTests(unittest.TestCase):
         span = edge["evidence"][0]["source_mention"]
         self.assertEqual(text[span["start"]:span["end"]], "Alfa S.r.l.")
         self.assertTrue(nodes["document:synthetic:a"]["synthetic"])
+
+    def test_account_title_and_unnamed_party_keep_the_correct_holder(self):
+        iban = "IT60X0542811101000000123456"
+        for wording, value, label, other_mentions in (
+            ("al Sig. Susanna Catalano", "Susanna Catalano", "PERSON", [("Sig", "COMPANY")]),
+            ("alla Parte Venditrice", "Parte Venditrice", "PARTY", []),
+            ("alla società Logitalia Italia", "Logitalia Italia", "COMPANY", [("Logitalia Italia", "PERSON")]),
+        ):
+            with self.subTest(wording=wording):
+                doc = document("a", f"L'IBAN {iban} è intestato {wording}.",
+                               [(iban, "BANK_ACCOUNT"), *other_mentions], synthetic=True)
+                graph = build_graph([doc], context=True)
+                edge, = edges(graph, "CONTEXT_RELATION")
+                nodes = {n["id"]: n for n in graph["nodes"]}
+                holder = nodes[edge["source"]]
+                self.assertEqual((holder["name"], holder["label"]), (value, label))
+
+    def test_payment_requires_monetary_wording(self):
+        mentions = [("Maria Rossi", "PERSON"), ("Luca Bianchi", "PERSON")]
+        docs = [document("transfer", "Maria Rossi ha ricevuto 500 euro da Luca Bianchi.", mentions),
+                document("call", "Maria Rossi ha ricevuto una telefonata da Luca Bianchi.", mentions),
+                document("invoice", "Maria Rossi ha ricevuto una fattura da Luca Bianchi.", mentions),
+                document("metaphor", "Maria Rossi ha pagato con la vita.", mentions[:1])]
+        graph = build_graph(docs, context=True)
+        payments = [n["document_id"] for n in graph["nodes"] if n.get("label") == "payment"]
+        self.assertEqual(payments, ["transfer"])
+
+    def test_review_checks_residence_separately_from_the_procedure_location(self):
+        text = "I carabinieri hanno denunciato un 60enne residente a Carpi per furto."
+        doc = document("a", text, [("Carpi", "LOCATION")])
+        passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text),
+                   "context_mentions": context_mentions(doc)}
+        candidates = {f["kind"]: f for f in reviewable_facts(passage)}
+        self.assertIn("residence", candidates)
+        procedure = candidates["procedure"]
+        self.assertEqual(procedure["arguments"]["object"]["text"], "un 60enne")
+        self.assertNotIn("place", procedure["arguments"])
+
+    def test_qwen_can_accept_a_residence_formulation_outside_the_baseline(self):
+        text = "Maria Rossi vive a Roma."
+        doc = document("a", text, [("Maria Rossi", "PERSON"), ("Roma", "LOCATION")])
+        passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text),
+                   "context_mentions": context_mentions(doc)}
+        self.assertEqual(edges(build_graph([doc], context=True), "CONTEXT_RELATION"), [])
+        candidate, = reviewable_facts(passage)
+        self.assertTrue(candidate["additional_candidate"])
+        vote = {"reference": _fact_reference(candidate), "answer": "1"}
+        response = {"role_response": None, "fact_responses": [vote]}
+        parsed = parse_context_review(json.dumps(response), passage)
+        graph = build_graph([doc], context=True, reviewed_facts={"a": parsed["facts"]})
+        self.assertEqual(edges(graph, "CONTEXT_RELATION")[0]["relation"], "residence")
+        vote["reference"][1] += 1
+        self.assertEqual(parse_context_review(json.dumps(response), passage)["status"], "invalid_response")
+
+    def test_qwen_coordination_assigns_one_target_to_each_initial_pair(self):
+        text = "Antonio Rossi, difensore di H.H., I.I. e J.J., ha depositato l'istanza."
+        passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text)}
+        relation = {"cue": 1,
+                    "source": {"text": "Antonio Rossi", "label": "PERSON", "kind": "name"},
+                    "target": {"text": "H.H., I.I. e J.J.", "label": "COMPANY", "kind": "description"}}
+        parsed = parse_relation_review(json.dumps({"relations": [relation]}), passage)
+        self.assertEqual(parsed["status"], "ok")
+        self.assertEqual([r["target"]["text"] for r in parsed["relations"]], ["H.H.", "I.I.", "J.J."])
+        self.assertTrue(all(r["target"]["label"] == "PERSON" for r in parsed["relations"]))
+
+    def test_agreement_recovers_two_parties_from_the_same_contract_phrase(self):
+        text = "Il contratto intercorso tra Alfa e Beta è acquisito agli atti."
+        doc = document("a", text, [("Alfa", "COMPANY"), ("Beta", "COMPANY")])
+        passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text),
+                   "context_mentions": context_mentions(doc)}
+        agreement, = reviewable_facts(passage)
+        self.assertEqual(agreement["kind"], "agreement")
+        self.assertEqual({role: mention["text"] for role, mention in agreement["arguments"].items()},
+                         {"subject": "Alfa", "object": "Beta"})
+
+    def test_agreement_can_recover_parties_absent_from_ner(self):
+        text = ("Con la presente scrittura privata tra il Sig. Ada Rossi, in qualità di locatore, "
+                "e la società Centro Verde, in qualità di conduttore, si conviene quanto segue.")
+        passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text), "context_mentions": []}
+        agreement, = reviewable_facts(passage)
+        self.assertEqual(agreement["kind"], "agreement")
+        self.assertEqual(agreement["arguments"]["subject"]["text"], "Ada Rossi")
+        self.assertEqual(agreement["arguments"]["object"]["text"], "Centro Verde")
 
     def test_attribution_and_negation_are_visible(self):
         text = "Ada Neri ha dichiarato che Lea Blu non ha incontrato Ida Mori."
@@ -108,12 +191,15 @@ class ContextGraphTests(unittest.TestCase):
                    "context_mentions": context_mentions(doc)}
         denied = parse_context_review('{"role_response":null,"action_responses":["0"]}', passage)
         accepted = parse_context_review('{"role_response":null,"action_responses":["1"]}', passage)
+        stale = parse_context_review('{"role_response":null,"action_responses":["1"]}', passage,
+                                     allow_positional=False)
         missing = parse_context_review('{"role_response":null,"action_responses":[]}', passage)
         self.assertEqual((denied["status"], denied["facts"]), ("ok", []))
         fact, = accepted["facts"]
         self.assertEqual(fact["arguments"]["subject"]["text"], "La polizia")
         self.assertEqual(fact["arguments"]["object"]["text"], "un 30enne")
         self.assertEqual(missing["status"], "invalid_response")
+        self.assertEqual(stale.get("facts", []), [])
 
     def test_age_description_ends_before_the_reason_for_the_report(self):
         doc = document("a", "La polizia ha denunciato un 30enne per furto.")
@@ -165,11 +251,14 @@ class ContextGraphTests(unittest.TestCase):
     def test_saved_context_review_replays_as_a_new_fact(self):
         text = "Maria Rossi ha accompagnato Luca Bianchi a Roma."
         doc = document("a", text, [("Maria Rossi", "PERSON"), ("Luca Bianchi", "PERSON"), ("Roma", "LOCATION")])
-        response = json.dumps({"role_response": None, "action_responses": ["1"]})
-
         def reviewed(passage, *_):
-            status = parse_context_review(response, passage)["status"]
-            attempt = {"status": status, "raw_response": response}
+            candidate, = reviewable_facts(passage)
+            response = json.dumps({"role_response": None, "fact_responses": [
+                {"reference": _fact_reference(candidate), "answer": "1"},
+            ]})
+            parsed = parse_context_review(response, passage)
+            attempt = {"status": parsed["status"], "raw_response": response,
+                       "accepted_count": len(parsed["facts"])}
             return {**attempt, "attempts": [attempt]}
 
         with TemporaryDirectory() as directory:

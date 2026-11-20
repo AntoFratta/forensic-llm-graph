@@ -10,11 +10,19 @@ SUBJECTS = {"PERSON", "COMPANY"}
 NAME = r"[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ]+(?:[’'-][A-ZÀ-ÖØ-Þ]?[a-zà-öø-ÿ]+)?"
 PERSON_DESCRIPTION = re.compile(
     r"\b(?:il|la|un|una|l['’])\s*(?:\d{2}enne(?:\s+"
-    r"(?!(?:a|al|con|da|dal|di|e|era|ha|in|per|si|è)\b)[a-zà-öø-ÿ]+)?|"
+    r"(?!(?:a|al|con|da|dal|dapprima|di|e|era|ha|in|per|residente|domiciliat[oa]|si|è)\b)[a-zà-öø-ÿ]+)?|"
     r"(?:uomo|donna|ragazzo|ragazza|operaio|operaia|testimone|imputat[oa]|indagat[oa])"
     r"(?:\s+di\s+\d{2}\s+anni)?|[a-zà-öø-ÿ]+\s+di\s+\d{2}\s+anni)\b", re.IGNORECASE,
 )
 ACCOUNT_DESCRIPTION = re.compile(r"\b(?:(?:il|un|sul|al)\s+)?conto\s+corrente\b", re.IGNORECASE)
+ACCOUNT_ATTRIBUTION = r"(?:è\s+|era\s+|risulta\s+)?(?:co)?intestat[oa]\s+(?:ad|alla|all['’]|al|a)"
+ACCOUNT_PARTY = re.compile(r"\b(?:parte\s+(?:venditrice|acquirente|locatrice|conduttrice)|"
+                           r"convenut[oa]|ricorrente|resistente)\b", re.IGNORECASE)
+PERSON_TITLE = r"(?:sig(?:\.ra)?|signor[ae]?|dott(?:\.ssa)?)\.?"
+ACCOUNT_NAMED_HOLDER = re.compile(
+    rf"\b(?i:{ACCOUNT_ATTRIBUTION})\s+(?:(?i:{PERSON_TITLE})\s+(?P<person>{NAME}(?:\s+{NAME}){{1,3}})|"
+    rf"(?i:società|ditta|impresa)\s+(?P<company>{NAME}(?:\s+{NAME}){{0,3}}))"
+)
 ABBREVIATED_COMPANY = re.compile(r"\bs\s*\.?\s*(?:r\.?\s*l(?:\.?\s*s)?|p\.?\s*a|n\.?\s*c|a\.?\s*s)$", re.IGNORECASE)
 ORGANIZATION = re.compile(
     rf"\b(?:Tribunale|Procura(?:\s+della\s+Repubblica)?|Corte\s+d['’]Appello|"
@@ -29,10 +37,21 @@ TRANSFER_OBJECT = re.compile(
     r"chiav[ei]|assegn[oi])\b", re.IGNORECASE,
 )
 AMOUNT = re.compile(r"(?<!\w)(?:€\s*\d[\d.,]*|\d[\d.,]*\s*(?:euro\b|€))", re.IGNORECASE)
-CLAUSE_BOUNDARY = re.compile(r"[;!?]|\n[^\S\n]*\n|(?<!\b[A-Za-z])(?<!\d)\.(?=\s+[A-Z]|\s*$)")
+PAYMENT_COMPLEMENT = re.compile(
+    r"\s+(?:(?:già|anche|direttamente)\s+)*(?:€|\d[\d.,]*\s*(?:euro\b|€)|"
+    r"(?:(?:il|lo|la|l['’]|un|una|i|le|gli)\s*)?(?:euro|denaro|soldi|somma|somme|importo|canone|"
+    r"rata|rate|bonific[oi]|assegn[oi]|stipendio|acconto|rimbors[oi]|sald[oi]|fondi)\b|"
+    r"(?:con|tramite|mediante)\s+(?:(?:un|due|tre|\d+)\s+)?bonific[oi]\b)", re.IGNORECASE,
+)
+PAYABLE_OBJECT = re.compile(r"\s+(?:(?:il|lo|la|un|una|i|le|gli)\s+)?(?:pedaggio|debit[oi]|fattur[ae])\b",
+                            re.IGNORECASE)
+CLAUSE_BOUNDARY = re.compile(r"[;!?]|\n[^\S\n]*\n|(?<!\b[A-Za-z])(?<!\d)"
+                             r"(?<!\b(?i:sig|avv))(?<!\b(?i:dott))(?<!\b(?i:sig\.ra))(?<!\b(?i:dott\.ssa))"
+                             r"\.(?=\s+[A-Z]|\s*$)")
 REPORTED = re.compile(r"\b(?:ha\s+(?:dichiarato|riferito|detto|affermato)|"
                       r"(?:dichiara|riferisce)\s+che|secondo\s+[^,;]{2,50}(?=,))", re.IGNORECASE)
-HYPOTHETICAL = re.compile(r"\b(?:se|forse|ipotizz\w+|presunt\w+|avrebbe(?:ro)?|sarebbe(?:ro)?)\b", re.IGNORECASE)
+HYPOTHETICAL = re.compile(r"\b(?:(?<!\banche )se|forse|ipotizz\w+|presunt\w+|avrebbe(?:ro)?|sarebbe(?:ro)?)\b",
+                          re.IGNORECASE)
 NEGATED = re.compile(r"\b(?:non|mai|senza)\b", re.IGNORECASE)
 
 # The order encodes which attachment is being checked, including passive wording.
@@ -43,8 +62,7 @@ DIRECT = (
      {"PERSON"}, {"LOCATION"}, False),
     ("registered_office", r"(?:(?:ha|aveva)\s+(?:la\s+)?sede(?:\s+legale)?|con\s+sede(?:\s+legale)?)\s+(?:a|in|presso)",
      {"COMPANY", "ORGANIZATION"}, {"LOCATION"}, False),
-    ("account_holder", r"(?:è\s+|era\s+|risulta\s+)?(?:co)?intestat[oa]\s+(?:ad|alla|all['’]|al|a)",
-     {"BANK_ACCOUNT"}, SUBJECTS, True),
+    ("account_holder", ACCOUNT_ATTRIBUTION, {"BANK_ACCOUNT"}, SUBJECTS | {"PARTY"}, True),
     ("account_holder", r"(?:è\s+|era\s+)?(?:co)?intestatari[oa]\s+(?:di|del|dell['’])(?:\s+un)?(?:\s+conto(?:\s+corrente)?)?(?:\s+con)?(?:\s+IBAN)?\s*[:=]?",
      SUBJECTS, {"BANK_ACCOUNT"}, False),
     ("contact", r"(?:(?:ha|aveva|usa|utilizza)\s+)?(?:l['’])?(?:indirizzo\s+)?(?:e-?mail|recapito|telefono|cellulare|PEC)\s*[:=]?",
@@ -54,8 +72,24 @@ DIRECT = (
     ("identifier", r"(?:con\s+)?(?:codice\s+fiscale|partita\s+IVA|P\.\s*IVA)\s*[:=]?",
      SUBJECTS, {"TAX_CODE", "VAT_NUMBER"}, False),
 )
-DIRECT = tuple((kind, re.compile(rf"(?<!\w)(?:{pattern})(?:(?<=['’])|(?!\w))", re.IGNORECASE), left, right, reverse)
-               for kind, pattern, left, right, reverse in DIRECT)
+def _direct_patterns(entries):
+    return tuple((kind, re.compile(rf"(?<!\w)(?:{pattern})(?:(?<=['’])|(?!\w))", re.IGNORECASE), left, right, reverse)
+                 for kind, pattern, left, right, reverse in entries)
+
+
+DIRECT = _direct_patterns(DIRECT)
+REVIEW_DIRECT = _direct_patterns((
+    ("family", r"(?:è|era)\s+sposat[oa]\s+con", {"PERSON"}, {"PERSON"}, False),
+    ("residence", r"(?:vive|viveva)\s+(?:a|in|nel|nella)", {"PERSON"}, {"LOCATION"}, False),
+    ("registered_office", r"(?:ha|aveva)\s+la\s+sede\s+legale\s+ubicata\s+(?:a|in)",
+     {"COMPANY", "ORGANIZATION"}, {"LOCATION"}, False),
+    ("account_holder", r"appart(?:iene|eneva)\s+(?:ad|alla|all['’]|al|a)",
+     {"BANK_ACCOUNT"}, SUBJECTS | {"PARTY"}, True),
+    ("contact", r"(?:è\s+|era\s+)?raggiungibile\s+(?:al\s+numero|all['’]indirizzo)",
+     SUBJECTS, {"PHONE", "EMAIL"}, False),
+    ("identifier", r"(?:è\s+|era\s+)?titolare\s+(?:del\s+codice\s+fiscale|della\s+partita\s+IVA)\s*[:=]?",
+     SUBJECTS, {"TAX_CODE", "VAT_NUMBER"}, False),
+))
 
 EVENTS = {
     "meeting": r"ha(?:nno)?\s+incontrat[oa]|incontrò|incontrava|si\s+(?:è|sono)\s+incontrat[oaie]\s+con",
@@ -69,8 +103,26 @@ EVENTS = {
     "statement": r"ha(?:nno)?\s+(?:dichiarato|riferito|testimoniato|affermato|negato)|dichiara|riferisce",
 }
 EVENTS = {kind: re.compile(rf"\b(?:{pattern})\b", re.IGNORECASE) for kind, pattern in EVENTS.items()}
+REVIEW_EVENTS = {
+    "meeting": r"aveva(?:no)?\s+incontrat[oa]|si\s+(?:è|sono)\s+riunit[oaie]\s+con",
+    "communication": r"ha(?:nno)?\s+(?:scritt[oa]\s+a|comunicato\s+con)|aveva(?:no)?\s+parlato\s+con",
+    "procedure": r"ha(?:nno)?\s+(?:denunciato|identificato|catturato|rintracciato)",
+    "payment": r"ha(?:nno)?\s+(?:riscosso|incassato|rimborsato)",
+    "delivery": r"ha(?:nno)?\s+(?:trasmesso|recapitato)",
+    "agreement": r"ha(?:nno)?\s+sottoscritto\s+(?:(?:un|il)\s+)?(?:contratto|accordo)\s+con",
+    "birth": r"(?:è|era)\s+venut[oa]\s+al\s+mondo\s+(?:a|in)",
+    "statement": r"ha(?:nno)?\s+(?:precisato|raccontato|riferit[oa])\s+che",
+}
+REVIEW_EVENTS = {kind: re.compile(rf"\b(?:{pattern})\b", re.IGNORECASE) for kind, pattern in REVIEW_EVENTS.items()}
+AGREEMENT_PARTIES = re.compile(r"\b(?:accordo|contratto(?:\s+di\s+(?:subappalto|locazione|cessione))?)"
+                               r"(?:\s+(?:intercorso|concluso|stipulato|siglato))?\s+tra\b", re.IGNORECASE)
+SIGNED_AGREEMENT = re.compile(
+    rf"(?P<predicate>(?i:\bscrittura\s+privata\s+tra))\s+(?i:(?:il|la)\s+{PERSON_TITLE})\s+"
+    rf"(?P<person>{NAME}(?:\s+{NAME}){{1,3}})\s*,[^;!?]{{0,240}}?\b(?i:e\s+la\s+(?:società|ditta|impresa))\s+"
+    rf"(?P<organization>{NAME}(?:\s+{NAME}){{0,4}})\s*,[^;!?]{{0,220}}?\b(?i:si\s+conviene)\b"
+)
 OPEN_VERB = re.compile(r"\b(?:ha|hanno|aveva|avevano)\s+[a-zà-öø-ÿ]+(?:ato|uto|ito)\b", re.IGNORECASE)
-GRAPH_LABELS = LABELS | {"ORGANIZATION", "OBJECT", "AMOUNT"}
+GRAPH_LABELS = LABELS | {"ORGANIZATION", "OBJECT", "AMOUNT", "PARTY"}
 
 
 def mention_key(entity: dict) -> tuple:
@@ -95,6 +147,7 @@ def context_mentions(document: dict) -> list:
         result[mention_key(e)] = e
     for regex, label, kind in ((PERSON_DESCRIPTION, "PERSON", "description"),
                                (ACCOUNT_DESCRIPTION, "BANK_ACCOUNT", "description"),
+                               (ACCOUNT_PARTY, "PARTY", "description"),
                                (ORGANIZATION, "ORGANIZATION", "name"),
                                (AUTHORITY_DESCRIPTION, "ORGANIZATION", "description"),
                                (TRANSFER_OBJECT, "OBJECT", "description"),
@@ -103,6 +156,15 @@ def context_mentions(document: dict) -> list:
             entity = {"start": match.start(), "end": match.end(), "text": match.group(), "label": label,
                       "mention_kind": kind, "source": "rule:context", "needs_review": False}
             result.setdefault(mention_key(entity), entity)
+    for match in ACCOUNT_NAMED_HOLDER.finditer(text):
+        name = match.lastgroup
+        start, end = match.span(name)
+        label = name.upper()
+        if any(e["label"] == label and e["start"] == start and e["end"] > end for e in result.values()):
+            continue
+        entity = {"start": start, "end": end, "text": text[start:end], "label": label,
+                  "mention_kind": "name", "source": "rule:account_context", "needs_review": False}
+        result[mention_key(entity)] = entity
     return sorted(result.values(), key=mention_key)
 
 
@@ -129,12 +191,16 @@ def _mention(text: str, entities: list, start: int, end: int, labels: set, *, be
     if not candidates:
         return None
     # A full span takes precedence over a nested abbreviation at the same boundary.
-    return min(candidates, key=lambda e: (e.get("needs_review", False),
+    return min(candidates, key=lambda e: (e.get("source") != "rule:account_context", e.get("needs_review", False),
                                          -(e["end"] - e["start"]), e["start"]))
 
 
 _LEFT = r"[\s,]*(?:non\s+)?(?:(?:è|era|fu)\s+)?"
 _RIGHT = r"[\s:,-]*(?:(?:il|la|un|una)\s+|l['’])?"
+_EVENT_LEFT = rf"{_LEFT}(?:(?:dapprima|poi|infine|successivamente|quindi|già)\s+)?"
+_REVIEW_LEFT = rf"(?:{_LEFT}|\s*,\s*[^,;.!?\n]{{1,48}},\s*(?:non\s+)?)"
+_REVIEW_EVENT_LEFT = rf"(?:{_EVENT_LEFT}|{_REVIEW_LEFT})"
+_REVIEW_RIGHT = rf"(?:(?:[\s,]+(?:poi|anche|ieri|successivamente|direttamente)\b)?{_RIGHT})"
 
 
 def _assertion(text: str, lo: int, start: int, hi: int) -> str:
@@ -172,10 +238,12 @@ def fact_key(fact: dict) -> tuple:
 
 
 def _event_arguments(text: str, entities: list, start: int, end: int, lo: int, hi: int,
-                     kind: str) -> dict:
+                     kind: str, *, review: bool = False) -> dict:
+    left_connector = _REVIEW_EVENT_LEFT if review else _EVENT_LEFT
+    right_connector = _REVIEW_RIGHT if review else _RIGHT
     labels = {"PERSON"} if kind == "birth" else SUBJECTS | {"ORGANIZATION"}
-    actor = _mention(text, entities, lo, start, labels, before=True, connector=_LEFT)
-    if not actor:
+    actor = _mention(text, entities, lo, start, labels, before=True, connector=left_connector)
+    if not actor or actor["text"].rstrip().endswith(("-", "–", "—")):
         return {}
     arguments = {"subject": actor}
     if kind == "statement":
@@ -184,17 +252,21 @@ def _event_arguments(text: str, entities: list, start: int, end: int, lo: int, h
     participant_labels = SUBJECTS | {"ORGANIZATION", "BANK_ACCOUNT"}
     following = end
     if kind == "delivery":
-        item = _mention(text, entities, following, hi, {"OBJECT"}, before=False, connector=_RIGHT)
+        item = _mention(text, entities, following, hi, {"OBJECT"}, before=False, connector=right_connector)
         if item:
             arguments["item"] = item
             following = item["end"]
     if kind == "payment":
-        amount = _mention(text, entities, following, hi, {"AMOUNT"}, before=False, connector=_RIGHT)
+        verb = text[start:end].casefold().split()[-1]
+        payable = verb in {"pagato", "rimborsato"} and PAYABLE_OBJECT.match(text, following, hi)
+        if not (verb == "bonifico" or PAYMENT_COMPLEMENT.match(text, following, hi) or payable):
+            return {}
+        amount = _mention(text, entities, following, hi, {"AMOUNT"}, before=False, connector=right_connector)
         if amount:
             arguments["amount"] = amount
             following = amount["end"]
     other = _mention(text, entities, following, hi, participant_labels,
-                     before=False, connector=rf"{_RIGHT}(?:(?:a|ad|da|con|presso|sul|dal|al)\s+)?")
+                     before=False, connector=rf"{right_connector}(?:(?:a|ad|da|con|presso|sul|dal|al)\s+)?")
     if other:
         arguments["object"] = other
     if kind in {"meeting", "communication", "delivery", "agreement", "action"} and not other:
@@ -208,7 +280,9 @@ def _event_arguments(text: str, entities: list, start: int, end: int, lo: int, h
             following = extra["end"]
             index += 1
     place_connector = r"\s+" if kind == "birth" else r"[\s,]*(?:a|ad|in|presso|nel|nella)\s+"
-    where = _mention(text, entities, following, hi, {"LOCATION"}, before=False, connector=place_connector)
+    relative_residence = other and re.search(r"\b(?:residente|domiciliat[oa])$", other["text"], re.IGNORECASE)
+    where = None if relative_residence else _mention(text, entities, following, hi, {"LOCATION"},
+                                                    before=False, connector=place_connector)
     if where:
         arguments["place"] = where
         following = where["end"]
@@ -221,36 +295,71 @@ def _event_arguments(text: str, entities: list, start: int, end: int, lo: int, h
     return arguments
 
 
-def extract_facts(document: dict, entities: list) -> list:
+def _agreement_arguments(text: str, entities: list, end: int, hi: int) -> dict:
+    labels = SUBJECTS | {"ORGANIZATION", "PARTY"}
+    participant_prefix = rf"{_RIGHT}(?:(?:società|ditta|impresa|{PERSON_TITLE})\s+)?"
+    first = _mention(text, entities, end, hi, labels, before=False, connector=participant_prefix)
+    if first:
+        second = _mention(text, entities, first["end"], hi, labels, before=False,
+                          connector=rf"\s+(?:e|ed){participant_prefix}")
+        if second:
+            return {"subject": first, "object": second}
+    return {}
+
+
+def _signed_agreements(text: str, entities: list):
+    for match in SIGNED_AGREEMENT.finditer(text):
+        arguments = {}
+        for role, label in (("subject", "PERSON"), ("object", "ORGANIZATION")):
+            start, end = match.span(label.lower())
+            arguments[role] = {"start": start, "end": end, "text": text[start:end], "label": label,
+                               "mention_kind": "name", "source": "rule:context", "needs_review": False}
+        yield _fact("agreement", match.span("predicate"), match.span(), arguments, text, entities)
+
+
+def extract_facts(document: dict, entities: list, *, review: bool = False) -> list:
     """Extract supported directed attributes and events over the whole document."""
     text = document["text"]
     facts = {}
-    for kind, regex, before, after, reverse in DIRECT:
+    direct = (*DIRECT, *REVIEW_DIRECT) if review else DIRECT
+    events = (*EVENTS.items(), *REVIEW_EVENTS.items(), ("agreement", AGREEMENT_PARTIES)) if review else EVENTS.items()
+    left_connector = _REVIEW_LEFT if review else _LEFT
+    right_connector = _REVIEW_RIGHT if review else _RIGHT
+    for kind, regex, before, after, reverse in direct:
         for predicate in regex.finditer(text):
             start, end = predicate.span()
             lo, hi = _bounds(text, start, end)
-            left = _mention(text, entities, lo, start, before, before=True, connector=_LEFT)
-            connector = rf"{_RIGHT}(?:(?:società|ditta|impresa)\s+)?" if "COMPANY" in after else _RIGHT
+            left = _mention(text, entities, lo, start, before, before=True, connector=left_connector)
+            connector = right_connector
+            if kind == "account_holder" and reverse:
+                connector = rf"{right_connector}(?:(?:società|ditta|impresa|{PERSON_TITLE})\s+)?"
             right = _mention(text, entities, end, hi, after, before=False, connector=connector)
             if left and right:
                 source, target = (right, left) if reverse else (left, right)
                 fact = _fact(kind, (start, end), (lo, hi), {"subject": source, "object": target}, text, entities)
                 facts[fact_key(fact)] = fact
-    for kind, pattern in EVENTS.items():
+    for kind, pattern in events:
         for predicate in pattern.finditer(text):
             start, end = predicate.span()
             lo, hi = _bounds(text, start, end)
-            arguments = _event_arguments(text, entities, start, end, lo, hi, kind)
+            arguments = (_agreement_arguments(text, entities, end, hi) if pattern is AGREEMENT_PARTIES else
+                         _event_arguments(text, entities, start, end, lo, hi, kind, review=review))
+            if review and pattern is REVIEW_EVENTS.get(kind) and kind == "procedure" and "object" not in arguments:
+                continue
             if arguments:
                 fact = _fact(kind, (start, end), (lo, hi), arguments, text, entities)
                 facts[fact_key(fact)] = fact
+    if review:
+        for fact in _signed_agreements(text, entities):
+            facts[fact_key(fact)] = fact
     return list(facts.values())
 
 
 def context_cues(text: str) -> int:
     """Count passages with possible facts, including actions outside the rule families."""
-    return sum(bool(p.search(text)) for _, p, *_ in DIRECT) + sum(
-        bool(p.search(text)) for p in (*EVENTS.values(), OPEN_VERB)
+    return sum(bool(p.search(text)) for _, p, *_ in (*DIRECT, *REVIEW_DIRECT)) + sum(
+        bool(p.search(text)) for p in (*EVENTS.values(), *REVIEW_EVENTS.values(),
+                                      AGREEMENT_PARTIES, SIGNED_AGREEMENT, OPEN_VERB)
     )
 
 
@@ -284,6 +393,34 @@ def reviewable_actions(passage: dict) -> list:
         if args:
             actions.append(_reviewed_fact(_fact("action", (start, end), (lo, hi), args, text, entities), base))
     return actions
+
+
+MAX_FACT_CANDIDATES = 4
+
+
+def reviewable_facts(passage: dict) -> list:
+    """Prioritize additional attachments and retain variety within each passage."""
+    base = passage["start"]
+    text = {"text": passage["text"]}
+    entities = _passage_entities(passage)
+    rules = {fact_key(fact): fact for fact in extract_facts(text, entities)}
+    expanded = {fact_key(fact): fact for fact in extract_facts(text, entities, review=True)}
+    facts = {}
+    for key, fact in (rules | expanded).items():
+        if passage["core_start"] <= fact["predicate_start"] + base < passage["core_end"]:
+            facts[key] = {**_reviewed_fact(fact, base), "additional_candidate": key not in rules}
+    typed_positions = {fact["predicate_start"] for fact in facts.values()}
+    candidates = [*facts.values(), *({**fact, "additional_candidate": True} for fact in reviewable_actions(passage)
+                                     if fact["predicate_start"] not in typed_positions)]
+    candidates.sort(key=lambda fact: (not fact["additional_candidate"], fact["predicate_start"], fact["kind"]))
+    ordered, remaining, seen = [], [], set()
+    for fact in candidates:
+        if fact["kind"] in seen:
+            remaining.append(fact)
+        else:
+            seen.add(fact["kind"])
+            ordered.append(fact)
+    return (ordered + remaining)[:MAX_FACT_CANDIDATES]
 
 
 def parse_fact(item: dict, passage: dict, locate) -> dict:

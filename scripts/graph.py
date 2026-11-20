@@ -161,14 +161,15 @@ def build_saved_graph(input_path: Path, review_path: Path | None, revalidate_rev
         content = review_path.read_bytes()
         review = json.loads(content.decode("utf-8-sig"))
         context = context or review["run"].get("profile") == "context"
-        if (not revalidate_reviews
-                and review["run"].get("code_sha256") != graph_code_hash(with_review=True)):
+        same_code = review["run"].get("code_sha256") == graph_code_hash(with_review=True)
+        if not revalidate_reviews and not same_code:
             raise ValueError("The relation review was produced with different graph code.")
         reviewed = load_review_relations(review, documents, input_sha256, revalidate=revalidate_reviews,
-                                         facts_by_document=facts)
+                                         facts_by_document=facts, allow_positional=same_code)
         review_metadata = {"relation_review_sha256": hashlib.sha256(content).hexdigest(),
                            "relation_review": review["run"],
-                           "relation_review_revalidated": revalidate_reviews}
+                           "relation_review_revalidated": revalidate_reviews,
+                           "historical_positional_facts_allowed": same_code}
 
     link_config = {}
     if context:

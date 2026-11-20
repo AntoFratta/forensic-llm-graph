@@ -55,6 +55,8 @@ _INITIAL_PAIR = r"[A-Z]\.[ \t]*[A-Z]\."
 _INITIALS = re.compile(rf"{_INITIAL_PAIR}(?!\w|[ \t]*[A-Z]\.)")
 _INITIAL_LIST_PREFIX = re.compile(rf"\s*(?:{_INITIAL_PAIR}\s*(?:,\s*|(?:e|ed)\s+))+")
 _INITIAL_LIST_COMMA = re.compile(rf"\s*,\s*(?={_INITIALS.pattern})")
+_COORDINATED_INITIALS = re.compile(rf"{_INITIAL_PAIR}(?:\s*(?:,|\be\b|\bed\b)\s*{_INITIAL_PAIR})+")
+_HONORIFIC = re.compile(r"(?:sig(?:\.ra)?|signor[ae]?|dott(?:\.ssa)?|avv)\.?", re.IGNORECASE)
 _COORDINATION = re.compile(r'\s*["»”]?\s+(?:e|ed)\s+', re.IGNORECASE)
 _ROLE_ARTICLE = re.compile(rf"\b{_ARTICLE}$", re.IGNORECASE)
 _NON_ASSERTED_ROLE = re.compile(
@@ -93,9 +95,21 @@ _COUNSEL_CLIENT_LINK = re.compile(
 def is_subject_candidate(text: str, label: str) -> bool:
     """Screen obvious category errors without changing the mention or its offsets."""
     normalized = unicodedata.normalize("NFKC", text).strip()
+    if _HONORIFIC.fullmatch(normalized) or _COORDINATED_INITIALS.fullmatch(normalized):
+        return False
     if label == "PERSON":
         return not _NON_PERSON.match(normalized)
     return not _NON_COMPANY.match(normalized) or bool(_COMPANY_SUFFIX.search(normalized))
+
+
+def split_relation_target(target: dict) -> list:
+    """Restore individual clients when a proposal quotes a list of legal initials."""
+    if not _COORDINATED_INITIALS.fullmatch(target["text"]):
+        return [target]
+    start = target["start"]
+    return [{**target, "text": match.group(), "start": start + match.start(), "end": start + match.end(),
+             "label": "PERSON", "mention_kind": "name"}
+            for match in re.finditer(_INITIAL_PAIR, target["text"])]
 
 
 def predicate_span(match: re.Match) -> tuple[int, int]:
@@ -216,7 +230,8 @@ def _target(text: str, mentions: list, start: int, labels: set) -> dict | None:
     target = min(candidates, key=lambda mention: (
         mention["start"], -mention["end"], mention.get("mention_kind") != "description",
     ), default=None)
-    if target is None and "PERSON" in labels and (initials := _INITIALS.match(text, start)):
+    if ("PERSON" in labels and (target is None or _COORDINATED_INITIALS.match(text, start))
+            and (initials := _INITIALS.match(text, start))):
         return {**_description(initials, "PERSON"), "mention_kind": "name"}
     return target
 

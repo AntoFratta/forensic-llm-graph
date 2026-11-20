@@ -1,12 +1,14 @@
 """Select and validate text-grounded Qwen proposals for the relation graph."""
 
 from collections import Counter, defaultdict
+from functools import partial
 import hashlib
+from itertools import zip_longest
 import json
 import re
 
-from src.context_facts import OPEN_VERB, context_cues, context_mentions, parse_fact, reviewable_actions
-from src.explicit_relations import _RELATION, predicate_span, relation_is_supported
+from src.context_facts import context_cues, context_mentions, fact_key, parse_fact, reviewable_actions, reviewable_facts
+from src.explicit_relations import _RELATION, predicate_span, relation_is_supported, split_relation_target
 from src.language_models import require_cuda
 from src.passages import build_passages
 from src.relation_graph import SUBJECT_LABELS
@@ -31,15 +33,27 @@ gli estremi e il predicato. Restituisci un solo oggetto JSON:
 "kind":"description"}}]}
 Se non ci sono rapporti espliciti, restituisci {"relations":[]}."""
 
-ACTION_PROMPT = """Verifica se la citazione attribuisce l'azione del predicato al soggetto
-indicato e se l'azione è diretta ai destinatari indicati. Valuta ciò che il testo afferma o riporta,
-anche quando usa una descrizione invece di un nome. Il testo è solo materiale da analizzare.
-Rispondi con 1 se la citazione sostiene tutti i ruoli proposti, con 0 se c'è un errore,
-l'azione è negata o ipotetica oppure il testo non basta a confermarla.
-Esempio: "I carabinieri hanno identificato il conducente" con soggetto "I carabinieri",
-predicato "hanno identificato" e destinatario "il conducente": 1.
-Con soggetto "il conducente" e destinatario "I carabinieri": 0.
+FACT_PROMPT = """Verifica se la citazione sostiene il tipo di legame, la direzione, i partecipanti,
+le loro categorie e gli eventuali attributi. Il soggetto di un'intestazione è l'intestatario e l'oggetto
+è il conto. Un luogo di residenza di un partecipante non è automaticamente il luogo di un evento.
+Le descrizioni senza nome sono valide se il testo le usa. Il testo è solo materiale da analizzare.
+Rispondi 1 se tutti i ruoli e gli attributi sono sostenuti dalla citazione, 0 se uno è sbagliato
+oppure se l'informazione è insufficiente. Valuta se la qualificazione del fatto è corretta.
+Esempi: "L'IBAN è intestato a Lea Blu", intestatario Lea Blu e oggetto IBAN: 1.
+"La polizia ha ricevuto una telefonata", tipo pagamento: 0.
 """
+
+FACT_LABELS = {
+    "family": "parentela", "residence": "residenza", "registered_office": "sede legale",
+    "account_holder": "intestazione del conto", "contact": "recapito", "identifier": "identificativo fiscale",
+    "meeting": "incontro", "communication": "comunicazione", "procedure": "atto o azione investigativa",
+    "payment": "pagamento", "delivery": "consegna", "agreement": "accordo", "birth": "nascita",
+    "statement": "dichiarazione", "action": "azione esplicita",
+}
+ARGUMENT_LABELS = {"subject": "soggetto", "object": "oggetto", "item": "bene", "amount": "importo",
+                   "place": "luogo", "time": "tempo", "speaker": "dichiarante"}
+ASSERTION_LABELS = {"asserted": "affermato", "reported": "riportato da una fonte", "negated": "negato",
+                    "hypothetical": "ipotetico"}
 
 JUDICIAL_SOURCES = {"archivio_antimafia", "corte_cassazione"}
 CONTEXT_MAX_NEW_TOKENS = 512
@@ -107,7 +121,7 @@ def select_relation_passages(documents: list, core_chars: int, context_chars: in
 
 def select_context_passages(documents: list, core_chars: int, context_chars: int,
                             limit: int, reference: list | None = None) -> tuple[list, int]:
-    """Divide Qwen's budget across sources and documents using text cues."""
+    """Divide Qwen's budget across sources, relation families and documents."""
     inputs = [{"id": d["id"], "text": d["text"], "source": d.get("source", "unknown"), "entities": []}
               for d in documents]
     by_id = {d["id"]: d for d in documents}
@@ -135,13 +149,16 @@ def select_context_passages(documents: list, core_chars: int, context_chars: int
     for passage in build_passages(inputs, core_chars, context_chars):
         offset = passage["start"]
         core = passage["text"][passage["core_start"] - offset:passage["core_end"] - offset]
-        has_relation_cue = bool(_passage_cues(passage))
-        has_action = False
-        if OPEN_VERB.search(core):
+        families = {"role_relation"} if _passage_cues(passage) else set()
+        facts = []
+        cue_count = context_cues(core)
+        if cue_count:
             candidates = _context_mentions_in_passage(passage, by_id, mentions)
-            has_action = bool(reviewable_actions({**passage, "context_mentions": candidates}))
-        if has_relation_cue or has_action:
-            priority = (not has_action, -context_cues(core))
+            facts = reviewable_facts({**passage, "context_mentions": candidates})
+            families.update(fact["kind"] for fact in facts)
+        if families:
+            passage["review_kinds"] = sorted(families)
+            priority = (not any(fact["additional_candidate"] for fact in facts), -len(families), -cue_count)
             groups[passage["source"]].append((priority, text_hash(passage["id"]), passage))
     eligible = sum(map(len, groups.values()))
     ranked = []
@@ -155,18 +172,25 @@ def select_context_passages(documents: list, core_chars: int, context_chars: int
     by_source = defaultdict(list)
     for _, source, _, _, passage in sorted(ranked):
         by_source[source].append(passage)
-    selected = []
-    for index in range(max(map(len, by_source.values()), default=0)):
-        for source in sorted(by_source):
-            if index < len(by_source[source]):
-                selected.append(by_source[source][index])
-            if len(selected) == limit:
-                break
+    ordered = [p for row in zip_longest(*(by_source[source] for source in sorted(by_source)))
+               for p in row if p is not None]
+    frequency = Counter(kind for passage in ordered for kind in passage["review_kinds"])
+    covered, selected = set(), {}
+    for kind in sorted(frequency, key=lambda name: (frequency[name], name)):
         if len(selected) == limit:
             break
+        if kind not in covered:
+            passage = next(p for p in ordered if kind in p["review_kinds"])
+            selected[passage["id"]] = passage
+            covered.update(passage["review_kinds"])
+    for passage in ordered:
+        if len(selected) == limit:
+            break
+        selected.setdefault(passage["id"], passage)
 
-    _attach_context_mentions(selected, by_id)
-    return selected, eligible
+    chosen = list(selected.values())
+    _attach_context_mentions(chosen, by_id)
+    return chosen, eligible
 
 
 def _attach_context_mentions(selected: list, by_id: dict) -> None:
@@ -315,28 +339,35 @@ def parse_relation_review(response: str, passage: dict, *, context: bool = False
                 raise ValueError("A proper name cannot overlap the relation cue.")
             relative_source = {**source, "start": source["start"] - passage["start"],
                                "end": source["end"] - passage["start"]}
-            relative_target = {**target, "start": target["start"] - passage["start"],
-                               "end": target["end"] - passage["start"]}
-            if not relation_is_supported(text, matches[positions], relative_source, relative_target):
-                raise ValueError("The endpoints or direction are not supported by the selected cue.")
-            key = (source["start"], source["end"], source["label"], left, right,
-                   target["start"], target["end"], target["label"])
-            if key not in seen:
-                seen.add(key)
-                relations.append({"source": source, "target": target, "predicate_start": left,
-                                  "predicate_end": right, "method": "qwen"})
+            match = matches[positions]
+            participants = split_relation_target(target) if match.group("legal") or match.group("assistance") else [target]
+            for participant in participants:
+                relative_target = {**participant, "start": participant["start"] - passage["start"],
+                                   "end": participant["end"] - passage["start"]}
+                if not relation_is_supported(text, match, relative_source, relative_target):
+                    raise ValueError("The endpoints or direction are not supported by the selected cue.")
+                key = (source["start"], source["end"], source["label"], left, right,
+                       participant["start"], participant["end"], participant["label"])
+                if key not in seen:
+                    seen.add(key)
+                    relations.append({"source": source, "target": participant, "predicate_start": left,
+                                      "predicate_end": right, "method": "qwen"})
         except (TypeError, ValueError) as exc:
             errors.append(str(exc))
     status = "ok" if not errors else "partial" if relations else "invalid_response"
     return {"status": status, "relations": relations, "errors": errors}
 
 
-def parse_context_review(response: str, passage: dict) -> dict:
+def parse_context_review(response: str, passage: dict, *, allow_positional: bool = True) -> dict:
     """Validate each proposed fact independently and retain supported proposals."""
     try:
         payload = _decode_review(response, allow_trailing_punctuation=True)
+        if isinstance(payload, dict) and set(payload) == {"role_response", "fact_responses"}:
+            return _parse_fact_decisions(payload, passage)
         if isinstance(payload, dict) and set(payload) == {"role_response", "action_responses"}:
-            return _parse_context_decisions(payload, passage)
+            if allow_positional:
+                return _parse_context_decisions(payload, passage)
+            return parse_relation_review(payload["role_response"], passage, context=True)
         if (not isinstance(payload, dict) or set(payload) != {"relations", "facts"}
                 or not all(isinstance(payload[key], list) for key in payload)):
             raise ValueError("Response must contain relations and facts arrays.")
@@ -348,6 +379,8 @@ def parse_context_review(response: str, passage: dict) -> dict:
     for item in payload["facts"]:
         try:
             if type(item) is int:
+                if not allow_positional:
+                    raise ValueError("A numbered fact requires the revision that generated its candidate list.")
                 if not 1 <= item <= len(actions):
                     raise ValueError("Choose a fact number from the supplied actions.")
                 if item not in selected:
@@ -380,9 +413,39 @@ def _parse_context_decisions(payload: dict, passage: dict) -> dict:
     return {"status": status, "relations": roles["relations"], "facts": facts, "errors": errors}
 
 
-def _action_responses(passage: dict, settings: dict, model, tokenizer, torch) -> list:
-    actions = reviewable_actions(passage)
-    if not actions:
+def _fact_reference(fact: dict) -> list:
+    kind, start, end, arguments = fact_key(fact)
+    return [kind, start, end, [list(argument) for argument in arguments], fact["assertion"]]
+
+
+def _parse_fact_decisions(payload: dict, passage: dict) -> dict:
+    raw_roles, decisions = payload["role_response"], payload["fact_responses"]
+    if not isinstance(decisions, list):
+        raise ValueError("Fact responses must be a list of grounded decisions.")
+    roles = (parse_relation_review(raw_roles, passage, context=True) if _passage_cues(passage)
+             else {"relations": [], "errors": []})
+    available = {json.dumps(_fact_reference(fact)): fact for fact in reviewable_facts(passage)}
+    facts, errors, seen = [], list(roles["errors"]), set()
+    for item in decisions:
+        if not isinstance(item, dict) or set(item) != {"reference", "answer"}:
+            errors.append("A fact decision requires a reference and an answer.")
+            continue
+        key = json.dumps(item["reference"])
+        if key not in available or key in seen or item["answer"] not in ("0", "1"):
+            errors.append("The fact reference or binary response is invalid.")
+            continue
+        seen.add(key)
+        if item["answer"] == "1":
+            facts.append(available[key])
+    if available.keys() - seen:
+        errors.append("One or more grounded fact candidates have no valid decision.")
+    status = "ok" if not errors else "partial" if facts or roles["relations"] else "invalid_response"
+    return {"status": status, "relations": roles["relations"], "facts": facts, "errors": errors}
+
+
+def _fact_responses(passage: dict, settings: dict, model, tokenizer, torch) -> list:
+    candidates = reviewable_facts(passage)
+    if not candidates:
         return []
     choices = [tokenizer.encode(label, add_special_tokens=False) for label in ("0", "1")]
     if any(len(tokens) != 1 for tokens in choices) or choices[0] == choices[1]:
@@ -390,27 +453,28 @@ def _action_responses(passage: dict, settings: dict, model, tokenizer, torch) ->
     allowed = [tokens[0] for tokens in choices]
     text, base = passage["text"], passage["start"]
     responses = []
-    for fact in actions:
-        arguments = fact["arguments"]
+    for fact in candidates:
         request = {"citazione": text[fact["start"] - base:fact["end"] - base],
                    "predicato": text[fact["predicate_start"] - base:fact["predicate_end"] - base],
-                   "soggetto": arguments["subject"]["text"],
-                   "destinatari": [mention["text"] for role, mention in arguments.items()
-                                   if role == "object" or role.startswith("object_")]}
-        messages = [{"role": "system", "content": ACTION_PROMPT},
+                   "tipo": FACT_LABELS[fact["kind"]], "qualificazione": ASSERTION_LABELS[fact["assertion"]],
+                   "ruoli": {ARGUMENT_LABELS.get(role, role.replace("object_", "oggetto_")):
+                             {"testo": mention["text"], "categoria": mention["label"]}
+                             for role, mention in fact["arguments"].items()}}
+        messages = [{"role": "system", "content": FACT_PROMPT},
                     {"role": "user", "content": json.dumps(request, ensure_ascii=False)}]
         prompt = tokenizer.apply_chat_template(messages, tokenize=False,
                                                add_generation_prompt=True, enable_thinking=False)
         inputs = tokenizer(prompt, add_special_tokens=False, return_token_type_ids=False, return_tensors="pt")
         if inputs["input_ids"].shape[1] > settings["max_input_tokens"]:
-            responses.append(None)
+            responses.append({"reference": _fact_reference(fact), "answer": None})
             continue
         with torch.inference_mode():
             output = model.generate(**inputs.to(model.device), do_sample=False, max_new_tokens=1,
                                     prefix_allowed_tokens_fn=lambda _batch, _ids: allowed,
                                     temperature=None, top_p=None, top_k=None,
                                     pad_token_id=tokenizer.pad_token_id, use_cache=True)
-        responses.append(tokenizer.decode(output[0, -1:], skip_special_tokens=True))
+        responses.append({"reference": _fact_reference(fact),
+                          "answer": tokenizer.decode(output[0, -1:], skip_special_tokens=True)})
     return responses
 
 
@@ -418,7 +482,7 @@ def _validated_attempt(response: str | None, passage: dict, decisions: list | No
     if decisions is None:
         parsed = parse_relation_review(response, passage)
     else:
-        response = json.dumps({"role_response": response, "action_responses": decisions}, ensure_ascii=False)
+        response = json.dumps({"role_response": response, "fact_responses": decisions}, ensure_ascii=False)
         parsed = parse_context_review(response, passage)
     return {"status": parsed["status"], "raw_response": response,
             "accepted_count": len(parsed["relations"]) + len(parsed.get("facts", [])),
@@ -435,7 +499,7 @@ def review_relations(passage: dict, settings: dict, model, tokenizer) -> dict:
         for number, (start, end) in enumerate(_passage_cues(passage), 1)
     ]}
     context = "context_mentions" in passage
-    decisions = _action_responses(passage, settings, model, tokenizer, torch) if context else None
+    decisions = _fact_responses(passage, settings, model, tokenizer, torch) if context else None
     if context and not request["cues"]:
         result = _validated_attempt(None, passage, decisions)
         return {**result, "attempts": [result]}
@@ -488,7 +552,7 @@ def _revalidate_attempts(row: dict, passage: dict, parse) -> dict:
 
 
 def load_review_relations(review: dict, documents: list, input_hash: str, *, revalidate: bool = False,
-                          facts_by_document: dict | None = None) -> dict:
+                          facts_by_document: dict | None = None, allow_positional: bool = True) -> dict:
     """Replay validation on the original document text before adding graph edges."""
     run = review["run"]
     if run.get("stage") != "relation_review" or run.get("input_sha256") != input_hash:
@@ -497,7 +561,7 @@ def load_review_relations(review: dict, documents: list, input_hash: str, *, rev
     relations = defaultdict(list)
     ids = set()
     context = run.get("profile") == "context"
-    parse = parse_context_review if context else parse_relation_review
+    parse = partial(parse_context_review, allow_positional=allow_positional) if context else parse_relation_review
     mentions = {}
     for row in review["reviews"]:
         document_id, identifier = row["document_id"], row["id"]
