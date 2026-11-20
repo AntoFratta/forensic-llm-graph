@@ -198,7 +198,13 @@ def _mention(text: str, entities: list, start: int, end: int, labels: set, *, be
 _LEFT = r"[\s,]*(?:non\s+)?(?:(?:è|era|fu)\s+)?"
 _RIGHT = r"[\s:,-]*(?:(?:il|la|un|una)\s+|l['’])?"
 _EVENT_LEFT = rf"{_LEFT}(?:(?:dapprima|poi|infine|successivamente|quindi|già)\s+)?"
-_REVIEW_LEFT = rf"(?:{_LEFT}|\s*,\s*[^,;.!?\n]{{1,48}},\s*(?:non\s+)?)"
+# A comma-delimited description may qualify a subject. A listed name starts a new one.
+_APPOSITION_START = (
+    r"(?:\d{1,3}\s+anni\b|di\s+origin[ei]\b|(?:residente|domiciliat[oa]|nat[oa])\s+|"
+    r"con\s+(?:studio|sede)\b|che\b|(?:il|la|un|una|l['’])\s*"
+    r"(?:\d{2}enne|uomo|donna|operaio|operaia|imputat[oa]|indagat[oa]|amministrat(?:ore|rice))\b)"
+)
+_REVIEW_LEFT = rf"(?:{_LEFT}|\s*,\s*(?={_APPOSITION_START})[^,;.!?\n]{{1,48}},\s*(?:non\s+)?)"
 _REVIEW_EVENT_LEFT = rf"(?:{_EVENT_LEFT}|{_REVIEW_LEFT})"
 _REVIEW_RIGHT = rf"(?:(?:[\s,]+(?:poi|anche|ieri|successivamente|direttamente)\b)?{_RIGHT})"
 

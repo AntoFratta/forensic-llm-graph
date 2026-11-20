@@ -1,6 +1,8 @@
 """Build a graph of subjects, documents and relationships grounded in text."""
 
+from collections import defaultdict
 from itertools import combinations
+import re
 import unicodedata
 
 from src.context_facts import context_mentions, extract_facts, fact_key, DIRECT
@@ -10,6 +12,7 @@ from src.passages import build_passages
 
 
 SUBJECT_LABELS = {"PERSON", "COMPANY"}
+_LEADING_ARTICLE = re.compile(r"(?:l\s*['’]\s*|(?:il|la|lo)\s+)", re.IGNORECASE)
 
 
 def _span_key(mention: dict) -> tuple:
@@ -53,6 +56,30 @@ def _relation_mentions(named: list, relations: list) -> list:
                    for description in descriptions):
             mentions.setdefault(_span_key(mention), mention)
     return sorted(mentions.values(), key=_span_key)
+
+
+def _same_relation_endpoint(text: str, left: dict, right: dict) -> bool:
+    if left["label"] != right["label"] or left["end"] != right["end"]:
+        return False
+    first, last = sorted((left["start"], right["start"]))
+    return first == last or bool(_LEADING_ARTICLE.fullmatch(text[first:last]))
+
+
+def _align_reviewed_relations(text: str, known: list, reviewed: list) -> list:
+    """Use the rule span when both ends identify the same occurrence at one predicate."""
+    by_predicate = defaultdict(list)
+    for relation in known:
+        by_predicate[relation["predicate_start"], relation["predicate_end"]].append(relation)
+    aligned = []
+    for relation in reviewed:
+        predicate = (relation["predicate_start"], relation["predicate_end"])
+        for existing in by_predicate[predicate]:
+            if all(_same_relation_endpoint(text, relation[role], existing[role]) for role in ("source", "target")):
+                aligned.append({**relation, "source": existing["source"], "target": existing["target"]})
+                break
+        else:
+            aligned.append(relation)
+    return aligned
 
 
 def _add_explicit_edges(text: str, relations: list, mentions: dict, edges: list) -> None:
@@ -167,6 +194,8 @@ def build_graph(documents: list, core_chars: int = 800, reviewed_relations: dict
         named = _subject_mentions(document)
         relations = extract_explicit_relations(document["text"], named)
         reviewed = reviewed_relations.get(identifier, ())
+        if context and reviewed:
+            reviewed = _align_reviewed_relations(document["text"], relations, reviewed)
         by_span = {_span_key(entity): entity for entity in _relation_mentions(named, relations)}
         for relation in reviewed:
             for entity in (relation["source"], relation["target"]):

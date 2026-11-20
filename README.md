@@ -111,9 +111,11 @@ python scripts/graph.py inspect --graph outputs/01_relation_graph.json --input o
 Run these commands from the repository root after generating or extracting the files above. The first command uses graph rules on the saved NER predictions. The second uses those same predictions and the Qwen relation responses from that run. Both commands run on CPU without model weights or a Hugging Face token. Use the Git revision printed in the Colab setup output, or a revision with the same graph code. Choose unused output filenames.
 
 ```bash
-python scripts/graph.py build --input outputs/01_ner_corpus.json --output outputs/01_relation_graph_rules.json
-python scripts/graph.py build --input outputs/01_ner_corpus.json --relation-reviews outputs/01_relation_reviews.json --output outputs/01_relation_graph_rebuilt.json
+python scripts/graph.py build --context --input outputs/01_ner_corpus.json --output outputs/01_relation_graph_rules.json
+python scripts/graph.py build --context --input outputs/01_ner_corpus.json --relation-reviews outputs/01_relation_reviews.json --output outputs/01_relation_graph_rebuilt.json
 ```
+
+Add `--revalidate-reviews` and choose a new output filename to apply updated graph validation to existing responses. Contextual decisions are matched against their saved predicate and argument offsets. Use the original revision to replay older contextual decisions recorded only by position in a candidate list.
 
 <details>
 <summary>Run the pipeline from the command line</summary>

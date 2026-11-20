@@ -120,6 +120,34 @@ class ContextGraphTests(unittest.TestCase):
         self.assertEqual([r["target"]["text"] for r in parsed["relations"]], ["H.H.", "I.I.", "J.J."])
         self.assertTrue(all(r["target"]["label"] == "PERSON" for r in parsed["relations"]))
 
+    def test_review_does_not_skip_a_listed_person_to_attach_a_family_relation(self):
+        text = "Bruno Verdi, Luca Bianchi, fratello di Ada Neri."
+        doc = document("a", text, [("Bruno Verdi", "PERSON"), ("Ada Neri", "PERSON")])
+        passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text),
+                   "context_mentions": context_mentions(doc)}
+        self.assertEqual(reviewable_facts(passage), [])
+
+        text = "Luca Bianchi, 45 anni, fratello di Ada Neri."
+        doc = document("b", text, [("Luca Bianchi", "PERSON"), ("Ada Neri", "PERSON")])
+        passage = {**passage, "text": text, "core_end": len(text), "context_mentions": context_mentions(doc)}
+        fact, = reviewable_facts(passage)
+        self.assertEqual(fact["arguments"]["subject"]["text"], "Luca Bianchi")
+
+    def test_article_variants_confirm_the_same_legal_edge(self):
+        text = "L 'Avvocato Antonio Rossi, difensore di H.H., I.I. e J.J."
+        doc = document("a", text, [("Avvocato Antonio Rossi", "PERSON")])
+        passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text)}
+        payload = {"relations": [{"cue": 1,
+                                  "source": {"text": "L 'Avvocato Antonio Rossi", "label": "PERSON",
+                                             "kind": "description"},
+                                  "target": {"text": "H.H., I.I. e J.J.", "label": "PERSON", "kind": "name"}}]}
+        parsed = parse_relation_review(json.dumps(payload), passage)
+        graph = build_graph([doc], context=True, reviewed_relations={"a": parsed["relations"]})
+        relations = edges(graph, "EXPLICIT_RELATION")
+        self.assertEqual(len(relations), 3)
+        self.assertEqual(len({r["source"] for r in relations}), 1)
+        self.assertTrue(all(r["evidence"][0]["qwen_reviewed"] for r in relations))
+
     def test_agreement_recovers_two_parties_from_the_same_contract_phrase(self):
         text = "Il contratto intercorso tra Alfa e Beta è acquisito agli atti."
         doc = document("a", text, [("Alfa", "COMPANY"), ("Beta", "COMPANY")])
