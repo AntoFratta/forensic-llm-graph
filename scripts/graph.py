@@ -14,15 +14,18 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from scripts.run_hybrid import validate_config, write_result
 from scripts.run_pipeline import project_path
 from src.evaluation import _metrics
+from src.graph_queries import inspect_graph, score_context
 from src.language_models import load_model
 from src.relation_graph import SUBJECT_LABELS, build_graph
-from src.relation_review import load_review_relations, review_relations, select_relation_passages, text_hash
+from src.relation_review import (load_review_relations, review_relations, select_context_passages,
+                                 select_relation_passages, text_hash)
 
 
 def graph_code_hash(with_review: bool = False) -> str:
     """Identify the extraction code used for an evaluation run."""
     digest = hashlib.sha256()
-    files = ["src/explicit_relations.py", "src/relation_graph.py", "src/passages.py", "src/deterministic.py"]
+    files = ["src/explicit_relations.py", "src/relation_graph.py", "src/passages.py", "src/deterministic.py",
+             "src/context_facts.py", "src/document_links.py", "src/llm_filter.py"]
     if with_review:
         files.append("src/relation_review.py")
     for name in files:
@@ -48,22 +51,27 @@ def load_ner(path: Path) -> tuple[dict, list, str]:
     return run, data["documents"], fingerprint
 
 
-def prepare(input_path: Path, reference_path: Path | None, limit: int) -> dict:
+def prepare(input_path: Path, reference_path: Path | None, limit: int, *, context: bool = False) -> dict:
     """Select passages and record the input and code used to produce the plan."""
     if limit < 1:
         raise ValueError("The passage budget must be positive.")
     run, documents, input_hash = load_ner(input_path)
     settings = run.get("config", {}).get("passages", {})
+    core, padding = settings.get("core_chars", 800), settings.get("context_chars", 160)
     units = None
     if reference_path is not None:
         reference = json.loads(reference_path.read_text(encoding="utf-8-sig"))
         if reference["input_sha256"] != input_hash:
             raise ValueError("The reference must use the same saved NER input.")
         units = reference["units"]
-    passages, eligible = select_relation_passages(documents, settings.get("core_chars", 800),
-                                                 settings.get("context_chars", 160), limit, units)
+    if context:
+        passages, eligible = select_context_passages(documents, core, padding, limit, units)
+    else:
+        passages, eligible = select_relation_passages(documents, core, padding, limit, units)
     return {"run": {"stage": "relation_review_plan", "input_sha256": input_hash,
                     "code_sha256": graph_code_hash(with_review=True),
+                    "profile": "context" if context else "legacy",
+                    "max_passages": limit,
                     "scope": "reference_diagnostic" if units is not None else "corpus",
                     "eligible_passages": eligible, "selected_passages": len(passages)},
             "passages": [{**p, "text_sha256": text_hash(p["text"])} for p in passages]}
@@ -104,30 +112,40 @@ def run_review(plan_path: Path, config_path: Path) -> dict:
             "reviews": reviews}
 
 
-def build_saved_graph(input_path: Path, review_path: Path | None, revalidate_reviews: bool) -> dict:
+def build_saved_graph(input_path: Path, review_path: Path | None, revalidate_reviews: bool,
+                      *, context: bool = False, links_path: Path | None = None) -> dict:
     """Build a graph and record the fingerprints of the predictions and optional reviews."""
     if revalidate_reviews and review_path is None:
         raise ValueError("Revalidation requires --relation-reviews.")
 
     run, documents, input_sha256 = load_ner(input_path)
     core_chars = run.get("config", {}).get("passages", {}).get("core_chars", 800)
-    reviewed, review_metadata = {}, {}
+    reviewed, facts, review_metadata = {}, {}, {}
     if review_path is not None:
         content = review_path.read_bytes()
         review = json.loads(content.decode("utf-8-sig"))
+        context = context or review["run"].get("profile") == "context"
         if (not revalidate_reviews
                 and review["run"].get("code_sha256") != graph_code_hash(with_review=True)):
             raise ValueError("The relation review was produced with different graph code.")
-        reviewed = load_review_relations(review, documents, input_sha256, revalidate=revalidate_reviews)
+        reviewed = load_review_relations(review, documents, input_sha256, revalidate=revalidate_reviews,
+                                         facts_by_document=facts)
         review_metadata = {"relation_review_sha256": hashlib.sha256(content).hexdigest(),
                            "relation_review": review["run"],
                            "relation_review_revalidated": revalidate_reviews}
 
-    graph = build_graph(documents, core_chars, reviewed)
+    link_config = {}
+    if context:
+        link_path = links_path or PROJECT_ROOT / "configs/graph_links.json"
+        configuration = link_path.read_bytes()
+        link_config = json.loads(configuration.decode("utf-8-sig"))
+        review_metadata["link_config_sha256"] = hashlib.sha256(configuration).hexdigest()
+    graph = build_graph(documents, core_chars, reviewed, context=context, reviewed_facts=facts, link_config=link_config)
     node_counts = Counter(node["type"] for node in graph["nodes"])
     edge_counts = Counter(edge["type"] for edge in graph["edges"])
     graph["run"] = {
         "stage": "relation_graph",
+        "profile": "context" if context else "legacy",
         "input_path": str(input_path),
         "input_sha256": input_sha256,
         "code_sha256": graph_code_hash(with_review=review_path is not None),
@@ -135,7 +153,8 @@ def build_saved_graph(input_path: Path, review_path: Path | None, revalidate_rev
         "input_scope": run.get("scope"),
         "core_chars": core_chars,
         "subject_scope": "document",
-        "explicit_relation_method": "rules_and_qwen" if review_path else "role_representation_and_employment_patterns",
+        "explicit_relation_method": ("rules_and_qwen" if review_path else
+                                     "context_rules" if context else "role_representation_and_employment_patterns"),
         "descriptive_subject_count": sum(node.get("mention_kind") == "description" for node in graph["nodes"]),
         "nodes_by_type": dict(node_counts),
         "edges_by_type": dict(edge_counts),
@@ -235,6 +254,7 @@ def main() -> None:
     plan.add_argument("--input", required=True, help="Saved first-pass or hybrid NER JSON.")
     plan.add_argument("--reference", help="Optional reference JSON. Uses only passage text and offsets.")
     plan.add_argument("--max-passages", type=int, default=100)
+    plan.add_argument("--context", action="store_true", help="Select passages for broader contextual facts.")
     plan.add_argument("--output", required=True)
 
     review = commands.add_parser("review", help="Run Qwen on a prepared plan using CUDA.")
@@ -247,6 +267,8 @@ def main() -> None:
     build.add_argument("--relation-reviews", help="Saved Qwen responses to add to the graph.")
     build.add_argument("--revalidate-reviews", action="store_true",
                        help="Reapply current validation to saved complete Qwen attempts.")
+    build.add_argument("--context", action="store_true", help="Include contextual facts and cross-document links.")
+    build.add_argument("--links", help="Shared case and event references; defaults to configs/graph_links.json.")
     build.add_argument("--output", default="outputs/relation_graph.json")
 
     evaluate = commands.add_parser("evaluate", help="Score explicit edges against reviewed excerpts on CPU.")
@@ -256,13 +278,25 @@ def main() -> None:
                           help="Use known excerpts to diagnose a changed method.")
     evaluate.add_argument("--output", default="outputs/relation_evaluation.json")
 
-    for command in (plan, review, build, evaluate):
+    score = commands.add_parser("score-context", help="Score contextual facts and reviewed document pairs.")
+    score.add_argument("--graph", required=True)
+    score.add_argument("--reference", required=True)
+    score.add_argument("--output", required=True)
+
+    inspect = commands.add_parser("inspect", help="Export a document or shared node with original evidence.")
+    inspect.add_argument("--graph", required=True)
+    inspect.add_argument("--input", required=True, help="The same saved NER used for this graph.")
+    inspect.add_argument("--node", required=True, help="A document or graph node identifier.")
+    inspect.add_argument("--edge-type", action="append", default=[], help="Keep this edge type (repeatable).")
+    inspect.add_argument("--output", required=True)
+
+    for command in (plan, review, build, evaluate, score, inspect):
         command.add_argument("--overwrite", action="store_true", help="Replace an existing output file.")
     args = parser.parse_args()
 
     try:
         output = project_path(args.output)
-        input_names = ("input", "reference", "plan", "config", "relation_reviews", "graph")
+        input_names = ("input", "reference", "plan", "config", "relation_reviews", "graph", "links")
         input_paths = {
             name: project_path(value)
             for name in input_names
@@ -274,16 +308,31 @@ def main() -> None:
             raise FileExistsError("Output already exists. Choose another path or use --overwrite.")
 
         if args.command == "prepare":
-            result = prepare(input_paths["input"], input_paths.get("reference"), args.max_passages)
+            result = prepare(input_paths["input"], input_paths.get("reference"), args.max_passages,
+                             context=args.context)
         elif args.command == "review":
             result = run_review(input_paths["plan"], input_paths["config"])
         elif args.command == "build":
             result = build_saved_graph(input_paths["input"], input_paths.get("relation_reviews"),
-                                       args.revalidate_reviews)
+                                       args.revalidate_reviews, context=args.context or bool(args.links),
+                                       links_path=input_paths.get("links"))
         else:
             graph = json.loads(input_paths["graph"].read_text(encoding="utf-8-sig"))
-            reference = json.loads(input_paths["reference"].read_text(encoding="utf-8-sig"))
-            result = score_graph(graph, reference, diagnostic=args.diagnostic)
+            if args.command == "inspect":
+                _, documents, fingerprint = load_ner(input_paths["input"])
+                if graph["run"]["input_sha256"] != fingerprint:
+                    raise ValueError("Inspect requires the same saved NER used to build the graph.")
+                result = inspect_graph(graph, documents, args.node, args.edge_type)
+            else:
+                reference = json.loads(input_paths["reference"].read_text(encoding="utf-8-sig"))
+                if args.command == "score-context":
+                    if graph["run"].get("profile") != "context":
+                        raise ValueError("An expanded context graph is required.")
+                    if reference.get("input_sha256") != graph["run"]["input_sha256"]:
+                        raise ValueError("The context reference must match the graph's saved NER input.")
+                    result = score_context(graph, reference)
+                else:
+                    result = score_graph(graph, reference, diagnostic=args.diagnostic)
 
         output.parent.mkdir(parents=True, exist_ok=True)
         write_result(output, result)
@@ -293,8 +342,10 @@ def main() -> None:
         elif args.command == "build":
             print(f"Nodes: {result['run']['nodes_by_type']}")
             print(f"Edges: {result['run']['edges_by_type']}")
-        else:
+        elif args.command == "evaluate":
             print(result["overall"])
+        elif args.command == "score-context":
+            print(result["facts"]["overall"])
         print(f"Saved {output}")
     except (OSError, KeyError, RuntimeError, TypeError, ValueError) as exc:
         parser.exit(1, f"Error: {exc}\n")

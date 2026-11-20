@@ -3,6 +3,8 @@
 from itertools import combinations
 import unicodedata
 
+from src.context_facts import context_mentions, extract_facts, fact_key, DIRECT
+from src.document_links import add_document_links
 from src.explicit_relations import extract_explicit_relations, is_subject_candidate
 from src.passages import build_passages
 
@@ -88,7 +90,47 @@ def _add_explicit_edges(text: str, relations: list, mentions: dict, edges: list)
         evidence_by_span[evidence_key] = evidence
 
 
-def build_graph(documents: list, core_chars: int = 800, reviewed_relations: dict | None = None) -> dict:
+def _add_context_facts(facts: list, mentions: dict, document_id: str, text: str,
+                       nodes: list, edges: list, identifiers: list) -> None:
+    direct = {kind for kind, *_ in DIRECT}
+    for index, fact in enumerate(facts):
+        start, end = fact["predicate_start"], fact["predicate_end"]
+        predicate = " ".join(text[start:end].split())
+        evidence = {"document_id": document_id, "start": fact["start"], "end": fact["end"],
+                    "predicate_start": start, "predicate_end": end,
+                    "assertion": fact["assertion"], "method": fact["method"]}
+        if fact.get("qwen_reviewed"):
+            evidence["qwen_reviewed"] = True
+        arguments = {role: mentions[_span_key(entity)] for role, entity in fact["arguments"].items()}
+        if fact["kind"] in direct:
+            source, target = (arguments[k] for k in ("subject", "object"))
+            if source["subject"] == target["subject"]:
+                continue
+            edge_evidence = {**evidence, "source_mention": {k: source[k] for k in ("start", "end")},
+                             "target_mention": {k: target[k] for k in ("start", "end")}}
+            if speaker := arguments.get("speaker"):
+                edge_evidence["speaker"] = {k: speaker[k] for k in ("subject", "start", "end")}
+            edges.append({"type": "CONTEXT_RELATION", "source": source["subject"], "target": target["subject"],
+                          "relation": fact["kind"], "predicate": predicate, "evidence": [edge_evidence]})
+            if fact["kind"] == "identifier" and fact["assertion"] == "asserted":
+                identifiers.append((source["subject"], fact, document_id))
+            continue
+
+        event = f"fact:{document_id}:{start}:{end}:{index}"
+        nodes.append({"id": event, "type": "FACT", "document_id": document_id, "label": fact["kind"],
+                      "name": predicate, "assertion": fact["assertion"]})
+        edges.append({"type": "STATED_IN", "source": event, "target": f"document:{document_id}",
+                      "evidence": [evidence]})
+        for role, mention in arguments.items():
+            edges.append({"type": "FACT_ARGUMENT", "source": event, "target": mention["subject"],
+                          "role": role, "evidence": [{**evidence, "mention": {
+                              "start": mention["start"], "end": mention["end"],
+                          }}]})
+
+
+def build_graph(documents: list, core_chars: int = 800, reviewed_relations: dict | None = None,
+                *, context: bool = False, reviewed_facts: dict | None = None,
+                link_config: dict | None = None) -> dict:
     """Build the graph from the final entities of a saved NER run.
 
     Group named mentions by spelling and label within each document. Descriptions
@@ -100,7 +142,7 @@ def build_graph(documents: list, core_chars: int = 800, reviewed_relations: dict
     if type(core_chars) is not int or core_chars < 100:
         raise ValueError("Passage length must be an integer of at least 100 characters.")
 
-    nodes, edges, seen_documents = [], [], set()
+    nodes, edges, seen_documents, identifiers = [], [], set(), []
     reviewed_relations = reviewed_relations or {}
     for document in documents:
         if not isinstance(document, dict):
@@ -116,7 +158,8 @@ def build_graph(documents: list, core_chars: int = 800, reviewed_relations: dict
             "id": document_node,
             "type": "DOCUMENT",
             "document_id": identifier,
-            **{key: document[key] for key in ("source", "document", "title", "source_file", "url")
+            **{key: document[key] for key in ("source", "document", "title", "source_file", "url",
+                                             "case_id", "synthetic")
                if key in document},
         })
 
@@ -128,18 +171,48 @@ def build_graph(documents: list, core_chars: int = 800, reviewed_relations: dict
         for relation in reviewed:
             for entity in (relation["source"], relation["target"]):
                 by_span.setdefault(_span_key(entity), entity)
+        facts = {}
+        if context:
+            contextual = context_mentions(document)
+            descriptions = [e for e in by_span.values() if e.get("mention_kind") == "description"]
+            contextual_by_span = by_span.copy()
+            for entity in contextual:
+                key = _span_key(entity)
+                if entity["label"] in SUBJECT_LABELS and not is_subject_candidate(entity["text"], entity["label"]):
+                    continue
+                # Preserve full descriptions used by the legacy relations.
+                if any(e["label"] == entity["label"] and e["start"] <= entity["start"]
+                       and entity["end"] <= e["end"] and _span_key(e) != key for e in descriptions):
+                    continue
+                contextual_by_span.setdefault(key, entity)
+                if entity.get("source") != "rule:context":
+                    by_span.setdefault(key, entity)
+            for fact in extract_facts(document, list(contextual_by_span.values())):
+                facts[fact_key(fact)] = fact
+                for entity in fact["arguments"].values():
+                    by_span.setdefault(_span_key(entity), entity)
+            for fact in (reviewed_facts or {}).get(identifier, ()):
+                key = fact_key(fact)
+                if key in facts:
+                    facts[key]["qwen_reviewed"] = True
+                else:
+                    facts[key] = fact
+                    for entity in fact["arguments"].values():
+                        by_span.setdefault(_span_key(entity), entity)
         for _, entity in sorted(by_span.items()):
             start, end, label = entity["start"], entity["end"], entity["label"]
             kind = entity.get("mention_kind", "name")
-            if kind == "description":
+            if kind == "description" or label in {"TIME", "ROLE"}:
                 key = (kind, start, end, label)
             else:
                 name = unicodedata.normalize("NFC", " ".join(entity["text"].split()).casefold())
+                if context and label == "COMPANY":
+                    name = name.rstrip(".")
                 key = (kind, label, name)
             if key not in subjects:
                 subject = f"subject:{identifier}:{start}:{end}:{label}"
                 nodes.append({
-                    "id": subject, "type": "SUBJECT", "label": label,
+                    "id": subject, "type": "SUBJECT" if label in SUBJECT_LABELS else "ENTITY", "label": label,
                     "name": entity["text"], "mention_kind": kind, "document_id": identifier,
                 })
                 edge = {"type": "MENTIONED_IN", "source": subject, "target": document_node, "evidence": []}
@@ -154,6 +227,8 @@ def build_graph(documents: list, core_chars: int = 800, reviewed_relations: dict
             mentions[_span_key(entity)] = {**evidence, "subject": edge["source"]}
 
         _add_explicit_edges(document["text"], [*relations, *reviewed], mentions, edges)
+        if context:
+            _add_context_facts(list(facts.values()), mentions, identifier, document["text"], nodes, edges, identifiers)
         co_occurrences = {}
         passage_document = {"id": identifier, "text": document["text"], "entities": list(mentions.values())}
         for passage in build_passages([passage_document], core_chars, context_chars=0):
@@ -186,4 +261,7 @@ def build_graph(documents: list, core_chars: int = 800, reviewed_relations: dict
                         for mention in pair
                     ],
                 })
-    return {"nodes": nodes, "edges": edges}
+    graph = {"nodes": nodes, "edges": edges}
+    if context:
+        add_document_links(documents, graph, link_config or {}, identifiers)
+    return graph

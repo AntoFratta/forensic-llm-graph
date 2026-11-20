@@ -1,0 +1,47 @@
+{
+  "references": [
+    {
+      "type": "CASE",
+      "id": "gaspare_giudice",
+      "name": "Caso Gaspare Giudice",
+      "documents": [
+        "archivio_antimafia:giudice_dibattito_in_aula.pdf",
+        "archivio_antimafia:giudice_relazione_giunta.pdf"
+      ],
+      "anchors": ["Gaspare Giudice", "Giudice Gaspare"]
+    },
+    {
+      "type": "CASE",
+      "id": "procedimenti_corinaldo",
+      "name": "Vicenda giudiziaria di Corinaldo",
+      "sources": ["dice"],
+      "anchors": ["strage di Corinaldo", "strage alla Lanterna Azzurra di Corinaldo", "strage della discoteca Lanterna Azzurra di Corinaldo"]
+    },
+    {
+      "type": "SHARED_EVENT",
+      "id": "lanterna_azzurra_corinaldo_2018",
+      "name": "Evento alla Lanterna Azzurra di Corinaldo",
+      "sources": ["dice"],
+      "anchors": ["strage alla Lanterna Azzurra di Corinaldo", "strage della discoteca Lanterna Azzurra di Corinaldo"]
+    },
+    {
+      "type": "CASE",
+      "id": "operazione_crash_reggio",
+      "name": "Operazione Crash dei carabinieri di San Polo d’Enza",
+      "documents": ["dice:2902", "dice:2903"],
+      "anchors": ["operazione Crash", "operazione 'Crash'", "operazione – non a caso ribattezzata “Crash”"]
+    }
+  ],
+  "reviewed_subjects": [
+    {
+      "id": "gaspare_giudice",
+      "name": "Gaspare Giudice",
+      "label": "PERSON",
+      "case_id": "gaspare_giudice",
+      "documents": [
+        "archivio_antimafia:giudice_dibattito_in_aula.pdf",
+        "archivio_antimafia:giudice_relazione_giunta.pdf"
+      ]
+    }
+  ]
+}
