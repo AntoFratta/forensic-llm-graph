@@ -9,7 +9,8 @@ from src.llm_filter import LABELS
 SUBJECTS = {"PERSON", "COMPANY"}
 NAME = r"[A-ZÀ-ÖØ-Þ][a-zà-öø-ÿ]+(?:[’'-][A-ZÀ-ÖØ-Þ]?[a-zà-öø-ÿ]+)?"
 PERSON_DESCRIPTION = re.compile(
-    r"\b(?:il|la|un|una|l['’])\s*(?:\d{2}enne(?:\s+[a-zà-öø-ÿ]+)?|"
+    r"\b(?:il|la|un|una|l['’])\s*(?:\d{2}enne(?:\s+"
+    r"(?!(?:a|al|con|da|dal|di|e|era|ha|in|per|si|è)\b)[a-zà-öø-ÿ]+)?|"
     r"(?:uomo|donna|ragazzo|ragazza|operaio|operaia|testimone|imputat[oa]|indagat[oa])"
     r"(?:\s+di\s+\d{2}\s+anni)?|[a-zà-öø-ÿ]+\s+di\s+\d{2}\s+anni)\b", re.IGNORECASE,
 )
@@ -68,7 +69,7 @@ EVENTS = {
     "statement": r"ha(?:nno)?\s+(?:dichiarato|riferito|testimoniato|affermato|negato)|dichiara|riferisce",
 }
 EVENTS = {kind: re.compile(rf"\b(?:{pattern})\b", re.IGNORECASE) for kind, pattern in EVENTS.items()}
-OPEN_VERB = re.compile(r"(?:ha|hanno|aveva|avevano)\s+[a-zà-öø-ÿ]+(?:ato|uto|ito)\b", re.IGNORECASE)
+OPEN_VERB = re.compile(r"\b(?:ha|hanno|aveva|avevano)\s+[a-zà-öø-ÿ]+(?:ato|uto|ito)\b", re.IGNORECASE)
 GRAPH_LABELS = LABELS | {"ORGANIZATION", "OBJECT", "AMOUNT"}
 
 
@@ -253,6 +254,38 @@ def context_cues(text: str) -> int:
     )
 
 
+def _passage_entities(passage: dict) -> list:
+    base = passage["start"]
+    return [{**e, "start": e["start"] - base, "end": e["end"] - base}
+            for e in passage["context_mentions"]]
+
+
+def _reviewed_fact(fact: dict, base: int) -> dict:
+    return {**fact, "method": "qwen", "start": fact["start"] + base, "end": fact["end"] + base,
+            "predicate_start": fact["predicate_start"] + base, "predicate_end": fact["predicate_end"] + base,
+            "arguments": {role: {**e, "start": e["start"] + base, "end": e["end"] + base}
+                          for role, e in fact["arguments"].items()}}
+
+
+def reviewable_actions(passage: dict) -> list:
+    """Offer open predicates with grounded actors and objects for model confirmation."""
+    text, base = passage["text"], passage["start"]
+    core_start, core_end = passage["core_start"] - base, passage["core_end"] - base
+    entities = _passage_entities(passage)
+    actions = []
+    for match in OPEN_VERB.finditer(text, core_start):
+        start, end = match.span()
+        if start >= core_end:
+            break
+        if any(pattern.match(text, start) for pattern in EVENTS.values()):
+            continue
+        lo, hi = _bounds(text, start, end)
+        args = _event_arguments(text, entities, start, end, lo, hi, "action")
+        if args:
+            actions.append(_reviewed_fact(_fact("action", (start, end), (lo, hi), args, text, entities), base))
+    return actions
+
+
 def parse_fact(item: dict, passage: dict, locate) -> dict:
     """Use Qwen quotations to locate a clause and verify its attachments with the rules."""
     if not isinstance(item, dict) or set(item) != {"evidence", "predicate", "arguments"}:
@@ -272,7 +305,7 @@ def parse_fact(item: dict, passage: dict, locate) -> dict:
     lo, hi = _bounds(text, start, end)
     if quote_start < lo or (quote_end > hi and not re.fullmatch(r"[.!?]\s*", text[hi:quote_end])):
         raise ValueError("The fact evidence must be in one clause.")
-    entities = [{**e, "start": e["start"] - base, "end": e["end"] - base} for e in passage["context_mentions"]]
+    entities = _passage_entities(passage)
     relative = {"text": text}
     found = [f for f in extract_facts(relative, entities)
              if (f["predicate_start"], f["predicate_end"]) == (start, end)]
@@ -291,8 +324,5 @@ def parse_fact(item: dict, passage: dict, locate) -> dict:
         ):
             continue
         # Keep a rule-grounded argument even if the model omits an optional attribute.
-        return {**fact, "method": "qwen", "start": lo + base, "end": hi + base,
-                "predicate_start": start + base, "predicate_end": end + base,
-                "arguments": {role: {**e, "start": e["start"] + base, "end": e["end"] + base}
-                              for role, e in args.items()}}
+        return _reviewed_fact(fact, base)
     raise ValueError("The fact arguments or direction are unsupported by the selected wording.")

@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+from time import perf_counter
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -17,7 +18,7 @@ from src.evaluation import _metrics
 from src.graph_queries import inspect_graph, score_context
 from src.language_models import load_model
 from src.relation_graph import SUBJECT_LABELS, build_graph
-from src.relation_review import (load_review_relations, review_relations, select_context_passages,
+from src.relation_review import (CONTEXT_MAX_NEW_TOKENS, load_review_relations, review_relations, select_context_passages,
                                  select_relation_passages, text_hash)
 
 
@@ -77,13 +78,16 @@ def prepare(input_path: Path, reference_path: Path | None, limit: int, *, contex
             "passages": [{**p, "text_sha256": text_hash(p["text"])} for p in passages]}
 
 
-def run_review(plan_path: Path, config_path: Path) -> dict:
+def run_review(plan_path: Path, config_path: Path, *, checkpoint_path: Path | None = None,
+               check_first: int = 0) -> dict:
     """Validate the saved plan before loading Qwen and recording its responses."""
     content = plan_path.read_bytes()
     plan = json.loads(content.decode("utf-8-sig"))
     run = plan["run"]
     if run.get("stage") != "relation_review_plan" or run.get("code_sha256") != graph_code_hash(with_review=True):
         raise ValueError("Prepare the review plan with the same graph code before running Qwen.")
+    if check_first < 0:
+        raise ValueError("The initial review check must be non-negative.")
     passages = plan["passages"]
     if len(passages) != run["selected_passages"] or len({p["id"] for p in passages}) != len(passages):
         raise ValueError("Invalid passage list in review plan.")
@@ -97,19 +101,51 @@ def run_review(plan_path: Path, config_path: Path) -> dict:
 
     config = json.loads(config_path.read_text(encoding="utf-8-sig"))
     validate_config(config)
-    settings = config["llm"]
-    reviews = []
+    settings = dict(config["llm"])
+    if run.get("profile") == "context":
+        settings["max_new_tokens"] = min(settings["max_new_tokens"], CONTEXT_MAX_NEW_TOKENS)
+    plan_hash = hashlib.sha256(content).hexdigest()
     model_info = {"model": settings["model"], "revision": settings["revision"]}
-    if passages:
+    metadata = {**run, "stage": "relation_review", "plan_sha256": plan_hash, "settings": settings}
+    reviews = []
+    if checkpoint_path is not None and checkpoint_path.is_file():
+        saved = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        reviews = saved["reviews"]
+        if (any(saved["run"].get(key) != value for key, value in metadata.items())
+                or [row["id"] for row in reviews] != [p["id"] for p in passages[:len(reviews)]]):
+            raise ValueError("The review checkpoint does not match this plan and configuration.")
+        model_info = saved["run"]["model"]
+        print(f"Resuming with {len(reviews)}/{len(passages)} passages already reviewed.", flush=True)
+
+    def result() -> dict:
+        statuses = dict(Counter(row["status"] for row in reviews))
+        return {"run": {**metadata, "model": model_info, "statuses": statuses}, "reviews": reviews}
+
+    initial_count = min(check_first, len(passages))
+
+    def check_initial_reviews() -> None:
+        if (initial_count and len(reviews) >= initial_count
+                and all(row["status"] not in {"ok", "partial"} for row in reviews[:initial_count])):
+            raise RuntimeError(f"Qwen returned no usable response in the first {initial_count} passages. "
+                               f"Partial reviews: {checkpoint_path}.")
+
+    check_initial_reviews()
+    if len(reviews) < len(passages):
         model, tokenizer, model_info = load_model(settings, quantized=True)
-        for number, passage in enumerate(passages, 1):
+        for number, passage in enumerate(passages[len(reviews):], len(reviews) + 1):
+            started = perf_counter()
             review = review_relations(passage, settings, model, tokenizer)
-            reviews.append({**{key: val for key, val in passage.items() if key != "text"}, **review})
-            print(f"Reviewed {number}/{len(passages)}: {passage['id']} ({review['status']})", flush=True)
-    return {"run": {**run, "stage": "relation_review", "plan_sha256": hashlib.sha256(content).hexdigest(),
-                    "model": model_info, "settings": settings,
-                    "statuses": dict(Counter(row["status"] for row in reviews))},
-            "reviews": reviews}
+            seconds = round(perf_counter() - started, 2)
+            reviews.append({**{key: val for key, val in passage.items() if key != "text"}, **review,
+                            "review_seconds": seconds})
+            if checkpoint_path is not None:
+                write_result(checkpoint_path, result())
+            accepted = review.get("accepted_count", 0)
+            print(f"Reviewed {number}/{len(passages)}: {passage['id']} "
+                  f"({review['status']}, {accepted} accepted, {seconds:.1f}s)", flush=True)
+            if number == initial_count:
+                check_initial_reviews()
+    return result()
 
 
 def build_saved_graph(input_path: Path, review_path: Path | None, revalidate_reviews: bool,
@@ -260,6 +296,8 @@ def main() -> None:
     review = commands.add_parser("review", help="Run Qwen on a prepared plan using CUDA.")
     review.add_argument("--plan", required=True)
     review.add_argument("--config", default="configs/hybrid.json")
+    review.add_argument("--check-first", type=int, default=0,
+                        help="Stop if none of the initial passages has a usable model response.")
     review.add_argument("--output", required=True)
 
     build = commands.add_parser("build", help="Build the graph from saved predictions on CPU.")
@@ -307,11 +345,19 @@ def main() -> None:
         if output.exists() and not args.overwrite:
             raise FileExistsError("Output already exists. Choose another path or use --overwrite.")
 
+        checkpoint = None
         if args.command == "prepare":
             result = prepare(input_paths["input"], input_paths.get("reference"), args.max_passages,
                              context=args.context)
         elif args.command == "review":
-            result = run_review(input_paths["plan"], input_paths["config"])
+            checkpoint = output.with_suffix(".partial.json")
+            if checkpoint in input_paths.values():
+                raise ValueError("The review checkpoint path conflicts with an input file.")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            if args.overwrite:
+                checkpoint.unlink(missing_ok=True)
+            result = run_review(input_paths["plan"], input_paths["config"],
+                                checkpoint_path=checkpoint, check_first=args.check_first)
         elif args.command == "build":
             result = build_saved_graph(input_paths["input"], input_paths.get("relation_reviews"),
                                        args.revalidate_reviews, context=args.context or bool(args.links),
@@ -336,6 +382,8 @@ def main() -> None:
 
         output.parent.mkdir(parents=True, exist_ok=True)
         write_result(output, result)
+        if checkpoint is not None:
+            checkpoint.unlink(missing_ok=True)
         if args.command in {"prepare", "review"}:
             run = result["run"]
             print(f"Selected {run['selected_passages']} of {run['eligible_passages']} eligible passages.")

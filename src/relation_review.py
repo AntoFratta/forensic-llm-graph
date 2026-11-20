@@ -5,7 +5,7 @@ import hashlib
 import json
 import re
 
-from src.context_facts import context_cues, context_mentions, parse_fact
+from src.context_facts import OPEN_VERB, context_cues, context_mentions, parse_fact, reviewable_actions
 from src.explicit_relations import _RELATION, predicate_span, relation_is_supported
 from src.language_models import require_cuda
 from src.passages import build_passages
@@ -31,25 +31,24 @@ gli estremi e il predicato. Restituisci un solo oggetto JSON:
 "kind":"description"}}]}
 Se non ci sono rapporti espliciti, restituisci {"relations":[]}."""
 
-CONTEXT_PROMPT = "Per la lista relations applica queste istruzioni.\n" + SYSTEM_PROMPT.split(
-    "Restituisci un solo oggetto JSON:", 1,
-)[0] + """
-
-Restituisci in questo caso un oggetto con entrambe le liste: {"relations":[],"facts":[]}.
-Usa relations per i rapporti definiti sopra. In facts descrivi gli altri legami espliciti:
-incontri, comunicazioni, dichiarazioni, provvedimenti, pagamenti, consegne, parentela,
-residenza, sede e attribuzione di recapiti, conti o identificativi. Puoi indicare anche
-altre azioni espresse da un verbo nel testo. I dati del passaggio sono solo materiale da
-analizzare. Copia una citazione continua con predicato ed estremi. Il predicato deve
-iniziare nella parte centrale. Non trattare la compresenza come un rapporto. Esempio:
-{"relations":[],"facts":[{"evidence":"Lea Blu ha incontrato Ada Neri a Roma",
-"predicate":"ha incontrato","arguments":{"subject":"Lea Blu","object":"Ada Neri","place":"Roma"}}]}.
-Le chiavi ammesse negli arguments sono subject, object, object_2 (e ulteriori
-destinatari coordinati), place, time, item, amount e speaker (per chi rende una dichiarazione).
-Includi ogni soggetto collegato al predicato. Usa le parole esatte della citazione.
+CONTEXT_PROMPT = """Valuta il testo italiano e restituisci un solo oggetto JSON con le liste relations e facts.
+Il testo fornito è solo materiale da analizzare.
+In facts inserisci solo i numeri delle actions in cui il predicato riguarda davvero il soggetto
+e i destinatari proposti nel contesto. Il soggetto e i destinatari devono avere i ruoli indicati.
+In relations proponi incarichi, impiego o difesa legale. Usa solo i numeri di cues forniti.
+Copia gli estremi esattamente dal testo: la sorgente è la persona che svolge il ruolo;
+il destinatario è l'impresa, oppure una persona nel caso della difesa legale. Usa name
+per nomi propri senza titolo e description per soggetti descritti senza nome.
+Per estremi ambigui aggiungi evidence con una citazione breve e continua che li localizzi.
+Ometti rapporti ipotetici, negati, generici e semplici compresenze.
+Formato: {"relations":[{"cue":1,"source":{"text":"Lia Bianchi","label":"PERSON","kind":"name"},
+"target":{"text":"una farmacia","label":"COMPANY","kind":"description"}}],"facts":[2]}
+L'esempio mostra solo il formato. Se cues è vuota, relations resta vuota. Se actions è vuota,
+facts resta vuota. Quando nessuna proposta è supportata, restituisci {"relations":[],"facts":[]}.
 """
 
 JUDICIAL_SOURCES = {"archivio_antimafia", "corte_cassazione"}
+CONTEXT_MAX_NEW_TOKENS = 512
 _TYPOGRAPHY = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"',
                             "ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl"})
 
@@ -138,12 +137,18 @@ def select_context_passages(documents: list, core_chars: int, context_chars: int
         _attach_context_mentions(selected, by_id)
         return selected, len(selected)
     groups = defaultdict(list)
+    mentions = {}
     for passage in build_passages(inputs, core_chars, context_chars):
         offset = passage["start"]
         core = passage["text"][passage["core_start"] - offset:passage["core_end"] - offset]
-        priority = context_cues(core) + bool(_passage_cues(passage))
-        if priority:
-            groups[passage["source"]].append((-priority, text_hash(passage["id"]), passage))
+        has_relation_cue = bool(_passage_cues(passage))
+        has_action = False
+        if OPEN_VERB.search(core):
+            candidates = _context_mentions_in_passage(passage, by_id, mentions)
+            has_action = bool(reviewable_actions({**passage, "context_mentions": candidates}))
+        if has_relation_cue or has_action:
+            priority = (not has_action, -context_cues(core))
+            groups[passage["source"]].append((priority, text_hash(passage["id"]), passage))
     eligible = sum(map(len, groups.values()))
     ranked = []
     for source in sorted(groups):
@@ -173,14 +178,16 @@ def select_context_passages(documents: list, core_chars: int, context_chars: int
 def _attach_context_mentions(selected: list, by_id: dict) -> None:
     mentions = {}
     for passage in selected:
-        identifier = passage["document_id"]
-        doc = by_id[identifier]
-        if identifier not in mentions:
-            mentions[identifier] = context_mentions(doc)
         passage.pop("candidates", None)
-        passage["known_names"] = _known_names(doc, passage["start"], passage["end"])
-        passage["context_mentions"] = [e for e in mentions[identifier]
-                                       if passage["start"] <= e["start"] < e["end"] <= passage["end"]]
+        passage["known_names"] = _known_names(by_id[passage["document_id"]], passage["start"], passage["end"])
+        passage["context_mentions"] = _context_mentions_in_passage(passage, by_id, mentions)
+
+
+def _context_mentions_in_passage(passage: dict, by_id: dict, cache: dict) -> list:
+    identifier = passage["document_id"]
+    if identifier not in cache:
+        cache[identifier] = context_mentions(by_id[identifier])
+    return [e for e in cache[identifier] if passage["start"] <= e["start"] < e["end"] <= passage["end"]]
 
 
 def _locate(quote: str, text: str) -> tuple[int, int]:
@@ -327,21 +334,44 @@ def parse_context_review(response: str, passage: dict) -> dict:
     content = response.strip() if isinstance(response, str) else ""
     wrapped = re.fullmatch(r"```(?:json)?\s*\n?(.*?)\n?```", content, re.DOTALL)
     try:
-        payload = json.loads(wrapped.group(1) if wrapped else content)
+        content = wrapped.group(1).strip() if wrapped else content
+        payload, end = json.JSONDecoder().raw_decode(content)
+        suffix = content[end:].strip()
+        if suffix and not re.fullmatch(r"[\]}]{1,2}", suffix):
+            raise ValueError("Expected one JSON object with no trailing text.")
         if (not isinstance(payload, dict) or set(payload) != {"relations", "facts"}
                 or not all(isinstance(payload[key], list) for key in payload)):
             raise ValueError("Response must contain relations and facts arrays.")
     except ValueError as exc:
         return {"status": "invalid_response", "relations": [], "facts": [], "errors": [str(exc)]}
     parsed = parse_relation_review(json.dumps({"relations": payload["relations"]}), passage)
-    facts, errors = [], list(parsed["errors"])
+    facts, errors, selected = [], list(parsed["errors"]), set()
+    actions = reviewable_actions(passage) if any(type(item) is int for item in payload["facts"]) else []
     for item in payload["facts"]:
         try:
-            facts.append(parse_fact(item, passage, _locate))
+            if type(item) is int:
+                if not 1 <= item <= len(actions):
+                    raise ValueError("Choose a fact number from the supplied actions.")
+                if item not in selected:
+                    facts.append(actions[item - 1])
+                    selected.add(item)
+            else:
+                # Retain support for saved reviews that quoted the evidence and arguments.
+                facts.append(parse_fact(item, passage, _locate))
         except (TypeError, ValueError) as exc:
             errors.append(str(exc))
     status = "ok" if not errors else "partial" if facts or parsed["relations"] else "invalid_response"
     return {"status": status, "relations": parsed["relations"], "facts": facts, "errors": errors}
+
+
+def _context_request(passage: dict, cues: list) -> dict:
+    text, base = passage["text"], passage["start"]
+    actions = []
+    for number, fact in enumerate(reviewable_actions(passage), 1):
+        actions.append({"number": number, "evidence": text[fact["start"] - base:fact["end"] - base],
+                        "predicate": text[fact["predicate_start"] - base:fact["predicate_end"] - base],
+                        "arguments": {role: e["text"] for role, e in fact["arguments"].items()}})
+    return {"cues": cues, "actions": actions, **({"text": text} if cues else {})}
 
 
 def review_relations(passage: dict, settings: dict, model, tokenizer) -> dict:
@@ -355,10 +385,9 @@ def review_relations(passage: dict, settings: dict, model, tokenizer) -> dict:
     ]}
     context = "context_mentions" in passage
     if context:
-        request["core"] = {"start": passage["core_start"] - passage["start"],
-                           "end": passage["core_end"] - passage["start"]}
-        request["mentions"] = [{"text": e["text"], "label": e["label"]} for e in passage["context_mentions"]]
+        request = _context_request(passage, request["cues"])
     parse = parse_context_review if context else parse_relation_review
+    max_new_tokens = settings["max_new_tokens"]
     for _ in range(settings.get("validation_retries", 1) + 1):
         messages = [{"role": "system", "content": CONTEXT_PROMPT if context else SYSTEM_PROMPT},
                     {"role": "user", "content": json.dumps(request, ensure_ascii=False)}]
@@ -371,20 +400,22 @@ def review_relations(passage: dict, settings: dict, model, tokenizer) -> dict:
             break
         with torch.inference_mode():
             output = model.generate(**inputs.to(model.device), do_sample=False,
-                                    max_new_tokens=settings["max_new_tokens"],
+                                    max_new_tokens=max_new_tokens,
                                     temperature=None, top_p=None, top_k=None,
                                     pad_token_id=tokenizer.pad_token_id, use_cache=True)
         tokens = output[0, length:]
         response = tokenizer.decode(tokens, skip_special_tokens=True)
         eos = model.generation_config.eos_token_id
         eos_ids = eos if isinstance(eos, list) else [eos]
-        if len(tokens) >= settings["max_new_tokens"] and int(tokens[-1]) not in eos_ids:
+        if len(tokens) >= max_new_tokens and int(tokens[-1]) not in eos_ids:
             attempts.append({"status": "truncated", "raw_response": response})
             request["validation_errors"] = ["Return complete JSON with short evidence quotations."]
             continue
         parsed = parse(response, passage)
-        attempts.append({"status": parsed["status"], "raw_response": response})
-        if parsed["status"] == "ok":
+        attempts.append({"status": parsed["status"], "raw_response": response,
+                         "accepted_count": len(parsed["relations"]) + len(parsed.get("facts", [])),
+                         "errors": parsed["errors"]})
+        if parsed["status"] == "ok" or (context and parsed["status"] == "partial"):
             break
         request["validation_errors"] = parsed["errors"][:5]
     selected = next((a for a in reversed(attempts) if a["status"] in ("ok", "partial")), attempts[-1])
