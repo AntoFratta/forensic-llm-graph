@@ -8,13 +8,13 @@ A master's thesis project on named entity recognition (NER) and relation extract
 
 1. [Prepare the corpus](#prepare-the-corpus) locally to generate `data/processed/documents.json`.
 2. [Get access to Minerva](#models-and-access) and add your Hugging Face token to Colab.
-3. [Run the notebook on a T4 GPU](#end-to-end-on-google-colab). Upload only `documents.json`, then download the ZIP containing the NER predictions and relation graph.
+3. [Run the notebook on a T4 GPU](#end-to-end-on-google-colab). Upload `documents.json` to `/content/`, then download the ZIP containing the NER predictions and relation graph.
 4. [Read the outputs](#read-the-generated-outputs) to locate an edge's evidence in the original document.
 
 ## How the pipeline works
 
 1. **Extract entities.** Rules and Italian spaCy process every document. The ten labels are `PERSON`, `COMPANY`, `ROLE`, `LOCATION`, `EMAIL`, `PHONE`, `TAX_CODE`, `VAT_NUMBER`, `BANK_ACCOUNT` and `TIME`. Banking mentions include IBANs and other account numbers.
-2. **Select and review NER passages.** Minerva measures how surprising each passage is to the model using perplexity. The passages have cores of about 800 characters and up to 160 characters of context on either side. Selection combines perplexity with signals such as overlapping candidates and possible omissions. The review budget is 20% of passages, rounded up and capped at 100. Qwen reviews the highest-priority eligible passages within that budget. The pipeline checks proposed labels and spans against the text before merging them with the first pass.
+2. **Select and review NER passages.** Minerva measures how surprising each passage is to the model using perplexity. Passages have cores of about 800 characters and normally up to 160 characters of context on either side. Context is extended when needed to keep a first-pass candidate intact. Selection combines perplexity with signals such as overlapping candidates and possible omissions. The review budget is 20% of passages, rounded up and capped at 100. Qwen reviews the highest-priority eligible passages within that budget. The pipeline checks proposed labels and spans against the text before merging them with the first pass.
 3. **Build the relation graph.** The pipeline applies text-grounded rules to all documents and sends up to 100 selected passages to Qwen by default. Selection covers available contextual relation and event families, then rotates through the sources. Each passage can contain up to four anchored candidates, prioritising wording or attachments that the rules alone would omit. Qwen accepts or rejects each candidate with a constrained binary response. Saved decisions identify the predicate and argument spans, which are checked again before graph construction. For roles, employment and legal representation, Qwen can also propose endpoints that the validator checks against the original wording. [Relation review](src/relation_review.py) · [Contextual facts](src/context_facts.py)
 
 The graph creates a subgraph for every input document. `MENTIONED_IN` locates mentions, and `CO_OCCURS_WITH` records shared context within a passage. `EXPLICIT_RELATION` preserves the original role, employment and legal representation edges. `CONTEXT_RELATION` covers directed links such as residence, account ownership and attribution of identifiers. A `FACT` node groups participants and, where supported, its place, time or speaker. Evidence preserves zero-based character offsets with exclusive ends and records whether a contextual claim is stated, attributed, hypothetical or negated. [Graph construction](src/relation_graph.py)
@@ -73,18 +73,20 @@ The configuration pins the Hugging Face model revisions. [Baseline settings](con
 
 1. Sign in to Hugging Face and accept the access conditions on the model page. [Minerva access](https://huggingface.co/sapienzanlp/Minerva-350M-base-v1.0)
 2. From the same account, create a token with **Read** permissions. [Create an access token](https://huggingface.co/settings/tokens) · [Token documentation](https://huggingface.co/docs/hub/security-tokens)
-3. In Colab, open **Secrets** using the key icon. Add a secret named `HF_TOKEN`, paste the token as its value and enable **Notebook access**. [Colab Secrets instructions](https://codelabs.developers.google.com/onramp/instructions?hl=en)
+3. In Colab, open **Secrets** using the key icon. Add a secret named `HF_TOKEN`, paste the token as its value and enable **Notebook access**. [Google's Colab Secrets example](https://colab.research.google.com/github/googlecolab/colabtools/blob/main/notebooks/Gemini_and_Stable_Diffusion.ipynb)
 
 ## Run the project
 
-Start with `data/processed/documents.json` from [Prepare the corpus](#prepare-the-corpus). Each run creates its own predictions, relation reviews and graph. The following examples use `01` as the run prefix.
+Start with `data/processed/documents.json` from [Prepare the corpus](#prepare-the-corpus), or use a hybrid NER JSON from a previous run. The examples use `01` as the run prefix. The repository contains the code and source manifest. Data and prediction files are generated locally or in Colab.
 
 ### End-to-end on Google Colab
 
 1. Open the notebook, select **Runtime → Change runtime type → T4 GPU** and connect. [Colab notebook](https://colab.research.google.com/github/AntoFratta/forensic-llm-graph/blob/main/notebooks/forensic_llm_graph_colab.ipynb)
-2. In the setup cell, choose the input. For a full run, set `reuse_saved_ner = False`, enable the `HF_TOKEN` secret as described in [Models and access](#models-and-access), and upload your prepared `documents.json` through the **Files** panel. To reuse the NER stage, set `reuse_saved_ner = True`, enter the saved hybrid JSON filename in `saved_ner_name`, and upload that file instead.
-3. Set `run_number` to `"01"` to follow the filenames below. Keep `relation_budget = 100` for the default Qwen budget, or set another positive limit. Select **Runtime → Run all**. The notebook clones the code, installs dependencies and runs the stages for the selected input.
-4. Download `/content/01_run.zip` from the **Files** panel. Extract its contents into `outputs/` in your local clone, creating the folder if needed.
+2. Upload the input to `/content/` through the **Files** panel and choose the matching mode in the setup cell.
+   - **Full pipeline.** Upload `documents.json`, keep `reuse_saved_ner = False` and enable `HF_TOKEN`. [Models and access](#models-and-access)
+   - **Graph only.** Upload a saved `*_ner_corpus.json`, set `reuse_saved_ner = True` and set `saved_ner_name` to the uploaded filename. The Hugging Face token is optional in this mode.
+3. Use `run_number = "01"` for the filenames below, or select a new two-digit prefix. `relation_budget = 100` limits the passages sent to Qwen for relation review. Select **Runtime → Run all**. The notebook clones the code, installs the dependencies and prints `Pipeline revision` for the checkout it uses.
+4. Download `/content/01_run.zip` from the **Files** panel. Extract its contents into `outputs/` in your local clone, creating the folder if needed. In graph-only mode, keep the NER file you uploaded so you can inspect the source of each edge.
 
 If the runtime still holds its files after an interruption, rerun with the same number. Completed stages are reused, and both hybrid NER and relation review can resume from their checkpoints. By default, Colab stops if the first five passages yield no supported Qwen proposal and saves its responses in `01_relation_reviews.partial.json`. Set `initial_review_check = 0` when an empty initial sample is expected. Use a fresh prefix for a new run.
 
@@ -137,7 +139,7 @@ python scripts/graph.py build --context --input outputs/01_ner_corpus.json --rel
 
 Provide your own human-reviewed reference JSON for the same documents and text offsets. For NER, `evaluate.py` can score the baseline directly. For a controlled hybrid comparison, use `run_hybrid.py --reference` with `--compare-routing` to generate predictions for that reference, then pass them to `evaluate.py` with `--hybrid`. For relations, use `graph.py evaluate` with the graph and a reviewed relation reference tied to its NER input. The scorers run on CPU. Use `--help` on either scoring command for its full arguments. [NER reference and scoring code](src/evaluation.py) · [Relation scoring code](scripts/graph.py)
 
-Use `graph.py score-context` for the expanded graph. The reference records the SHA-256 of the saved NER in `input_sha256`. In `units`, each reviewed excerpt has an `id`, `document_id`, `start`, `end` and a `facts` array. Each fact records `kind`, `predicate_start`, `predicate_end`, `assertion` and `arguments`. The argument keys are role names, and each value records `label`, `start` and `end`. Exact matching checks the predicate, assertion and all argument spans. Include excerpts without target facts to check for extractions made in error.
+Use `graph.py score-context` for the expanded graph. The reference records the SHA-256 of the saved NER in `input_sha256`. In `units`, each reviewed excerpt has an `id`, `document_id`, `start`, `end` and a `facts` array. Each fact records `kind`, `predicate_start`, `predicate_end`, `assertion` and `arguments`. The argument keys are role names, and each value records `label`, `start` and `end`. Exact matching checks the predicate and assertion along with the subject and object of a directed relation or all arguments of a fact node. Include excerpts without target facts to check for extractions made in error.
 
 In `document_pairs`, each row specifies `documents` (two IDs), `kind` (`case`, `event` or `identity`) and a boolean `linked`. Include both related documents and similar but distinct cases. Score reviewed configuration entries as checks of the configured links. Use separate examples to measure generalization.
 
@@ -146,6 +148,8 @@ python scripts/graph.py score-context --graph outputs/01_relation_graph.json --r
 ```
 
 ## Experimental results
+
+### Named entity recognition
 
 **Controlled NER comparison.** The methods were compared on the same 12 reviewed excerpts with 137 annotated mentions. Precision, recall and micro F1 require exact boundaries and labels. Each hybrid variant selected three excerpts under the same budget.
 
@@ -157,9 +161,24 @@ python scripts/graph.py score-context --graph outputs/01_relation_graph.json --r
 
 **Full-corpus NER, run `05`.** Minerva scored 28,907 passages. Qwen returned 81 fully usable responses, 18 partially usable responses and one unusable response across 100 passages. The hybrid pass changed predictions in 29 documents. None of the 12 reviewed test excerpts was selected at corpus scale, and both the baseline and the hybrid output scored 63.24% micro F1 on those excerpts.
 
-**Original relation graph, experiment `06`.** The experiment revalidated the saved Qwen relation responses from run `05`. The resulting graph contains 10,654 document nodes, 38,081 subject nodes, 54,808 co-occurrence edges and 117 explicit edges. The rules-only variant produced 106 explicit edges on the same NER input. Inspection of the 11 added edges found textual support for each under the project's annotation criteria. On a 20-excerpt diagnostic sample, both variants matched 2 of 8 annotated relations exactly with zero false positives. The six missed relations were outside the passages selected for Qwen. These measurements apply to the original relation schema.
+**Diagnostic NER comparison.** On 12 annotated passages selected for Qwen in the full-corpus run, covering DICE and ArchivioAntimafia, micro F1 rose from 29.03% to 40.00%. This sample measures revision on selected passages.
 
-News articles make up about 97% of the corpus, and the annotated samples cover few judicial cases. These figures summarise recorded experiments. Their prediction files, reviewed references and detailed reports are held in the local research workspace and are excluded from Git. [Historical NER revision](https://github.com/AntoFratta/forensic-llm-graph/commit/b20a42ba6620948c0f881bdcc2181aabb232e93b)
+### Final relation graph
+
+The graph comparison uses the same full-corpus NER predictions for both variants. Run `10` reviewed 100 of 2,596 eligible passages across the five collections. It recorded 71 valid, eight partial and 21 invalid responses. The final graph, experiment `11`, revalidates those saved Qwen responses on CPU with the updated graph validator. [Qwen review revision](https://github.com/AntoFratta/forensic-llm-graph/commit/fe4e595671914339bf1a7d0411233d477486770a) · [Final validation revision](https://github.com/AntoFratta/forensic-llm-graph/commit/1c783236159fd6902cebee563944cb87116fbdf6)
+
+| Graph component | Rules only | Final graph | Added by Qwen |
+| --- | ---: | ---: | ---: |
+| Document nodes | 10,654 | 10,654 | 0 |
+| Contextual relation edges | 408 | 432 | 24 |
+| Fact nodes | 632 | 640 | 8 |
+| Role, employment and legal representation edges | 106 | 109 | 3 |
+
+Qwen added 35 relations or facts and confirmed 37 occurrences already extracted by the rules. The final graph has **127,399 nodes** and **520,812 edges**, including 116,100 mention edges and 402,555 co-occurrence edges. Three case nodes have 24 document memberships. One shared event links two documents, and one shared identity links two subject nodes from different documents. The 304 candidate document pairs are recorded separately for inspection.
+
+**Diagnostic evaluation.** Both graph variants recovered the three annotated contextual facts, linked the five positive document pairs and kept the three negative pairs separate. The sample includes known configuration examples, so these checks measure behaviour on the covered cases. News articles make up about 97% of the corpus, and the annotated samples cover few judicial cases.
+
+The archived predictions, references and detailed results are stored in the local research workspace. A new checkout generates its own outputs using the instructions above. An exact CPU rebuild of the recorded final graph uses the saved NER predictions, the archived relation responses and the final validation revision with `--revalidate-reviews`. [NER evaluation revision](https://github.com/AntoFratta/forensic-llm-graph/commit/b20a42ba6620948c0f881bdcc2181aabb232e93b)
 
 ## Repository layout
 

@@ -18,8 +18,14 @@ from src.evaluation import _metrics
 from src.graph_queries import inspect_graph, score_context
 from src.language_models import load_model
 from src.relation_graph import SUBJECT_LABELS, build_graph
-from src.relation_review import (CONTEXT_MAX_NEW_TOKENS, load_review_relations, review_relations, select_context_passages,
-                                 select_relation_passages, text_hash)
+from src.relation_review import (
+    CONTEXT_MAX_NEW_TOKENS,
+    load_review_relations,
+    review_relations,
+    select_context_passages,
+    select_relation_passages,
+    text_hash,
+)
 
 
 def graph_code_hash(with_review: bool = False) -> str:
