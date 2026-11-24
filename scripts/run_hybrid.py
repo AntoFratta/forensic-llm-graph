@@ -233,6 +233,7 @@ def main() -> None:
     parser.add_argument("--output", help="New result JSON; checkpoint path is derived from it.")
     parser.add_argument("--smoke-test", action="store_true", help="Test a few passages per collection.")
     parser.add_argument("--reference", help="Select only the operational cores of a reviewed reference.")
+    parser.add_argument("--allow-model-reference", action="store_true", help="Use a model-annotated diagnostic test.")
     parser.add_argument("--development-all", action="store_true",
                         help="Review every development reference core for offline routing calibration.")
     parser.add_argument("--compare-routing", action="store_true",
@@ -254,7 +255,10 @@ def main() -> None:
         if args.output:
             config["output_path"] = args.output
         validate_config(config)
-        reference, reference_hash = load_reference(project_path(args.reference)) if args.reference else (None, None)
+        reference, reference_hash = (load_reference(project_path(args.reference), allow_model_reference=args.allow_model_reference)
+                                     if args.reference else (None, None))
+        if reference and reference["split"] == "test" and "test_review_budget" in config:
+            config["routing"].update(max_review_fraction=1.0, max_review_passages=config["test_review_budget"])
         if args.smoke_test and reference:
             raise ValueError("Choose either a reference subset or an automatic smoke sample.")
         if args.development_all and (reference is None or reference["split"] != "development"):
@@ -299,6 +303,7 @@ def main() -> None:
                "config": config, "input_sha256": input_hash, "input_run": source["run"],
                "code_sha256": code_hash(), "git": git_info(),
                "reference_sha256": reference_hash,
+               "reference_status": reference.get("status", "human_reviewed") if reference else None,
                "input_document_count": len(source["documents"]), "document_count": len(documents),
                "full_passage_count": full_passage_count, "passage_count": len(passages),
                "passages_by_source": dict(Counter(p["source"] for p in passages)),

@@ -8,8 +8,8 @@ from pathlib import Path
 from src.llm_filter import LABELS
 
 
-def load_reference(path: Path) -> tuple[dict, str]:
-    """Require an explicit human review and preserve document-global offsets.
+def load_reference(path: Path, *, allow_model_reference: bool = False) -> tuple[dict, str]:
+    """Validate human references or explicitly requested model-annotated test data.
 
     Reference labels are used for evaluation only. Passage selection below
     reads identities and boundaries, never entity labels or annotation notes.
@@ -24,9 +24,13 @@ def load_reference(path: Path) -> tuple[dict, str]:
         raise ValueError("Freeze the test grouping and selection before evaluating it.")
     seen = set()
     cores = defaultdict(list)
+    model_reference = reference.get("status") == "model_annotated"
+    if model_reference and not (allow_model_reference and reference["split"] == "test"):
+        raise ValueError("This model-annotated test requires --allow-model-reference.")
     for unit in reference["units"]:
-        if (unit.get("annotation_status") != "reviewed" or not unit.get("human_review")
-                or any(issue.get("status") == "open" for issue in unit.get("issues", []))):
+        if any(issue.get("status") == "open" for issue in unit.get("issues", [])):
+            raise ValueError("Resolve open annotation issues before scoring.")
+        if not model_reference and (unit.get("annotation_status") != "reviewed" or not unit.get("human_review")):
             raise ValueError("Every reference unit must be human-reviewed, without open issues.")
         if unit.get("split") != reference["split"]:
             raise ValueError("Do not mix development and test reference units.")

@@ -29,13 +29,25 @@ class EvaluationTests(unittest.TestCase):
                           "context_chars": 0, "units": [self.unit]}
         self.document = {"id": "one", "source": "example", "text": self.text, "entities": []}
 
-    def read(self, reference):
+    def read(self, reference, **options):
         root = Path(__file__).resolve().parents[1] / "outputs"
         root.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=root) as directory:
             path = Path(directory) / "reference.json"
             path.write_text(json.dumps(reference), encoding="utf-8")
-            return load_reference(path)[0]
+            return load_reference(path, **options)[0]
+
+    def test_model_reference_requires_explicit_diagnostic_mode_and_valid_spans(self):
+        self.reference.update(split="test", split_frozen=True, status="model_annotated")
+        self.unit["split"] = "test"
+        self.unit.pop("human_review")
+        self.unit.pop("annotation_status")
+        with self.assertRaises(ValueError):
+            self.read(self.reference)
+        self.read(self.reference, allow_model_reference=True)
+        self.unit["entities"][0]["text"] = "Ada!"
+        with self.assertRaises(ValueError):
+            self.read(self.reference, allow_model_reference=True)
 
     def test_wrong_label_and_boundary_are_errors_and_duplicate_predictions_count_once(self):
         self.document["entities"] = [self.unit["entities"][0], self.unit["entities"][0],

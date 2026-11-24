@@ -100,7 +100,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="configs/baseline.json")
     parser.add_argument("--output", help="Use a different output path for this run.")
-    parser.add_argument("--rules-only", action="store_true", help="Run without the spaCy model.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--rules-only", action="store_true", help="Run without the spaCy model.")
+    mode.add_argument("--spacy-only", action="store_true", help="Score raw model spans mapped to project labels.")
+    parser.add_argument("--input", help="Run on a prepared subset of documents.")
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing output file.")
     args = parser.parse_args()
 
@@ -120,6 +123,8 @@ def main() -> None:
         config["spacy_batch_size"] = batch_size
         if args.output is not None:
             config["output_path"] = args.output
+        if args.input is not None:
+            config["input_path"] = args.input
 
         input_path = project_path(config["input_path"])
         output_path = project_path(config["output_path"])
@@ -131,7 +136,7 @@ def main() -> None:
             raise FileExistsError("Output already exists. Choose another path or use --overwrite.")
 
         documents, input_sha256 = load_documents(input_path)
-        use_spacy = config["use_spacy"] and not args.rules_only
+        use_spacy = args.spacy_only or (config["use_spacy"] and not args.rules_only)
         nlp = None
         started = time.perf_counter()
         if use_spacy:
@@ -158,7 +163,7 @@ def main() -> None:
                         "synthetic", "language", "template_id", "source_revision", "source_url", "source_line"):
                 if key in document:
                     result[key] = document[key]
-            result["entities"] = extract_entities(document["text"], doc=doc)
+            result["entities"] = extract_entities(document["text"], doc=doc, spacy_only=args.spacy_only)
             results.append(result)
             if number == 1 or number % 100 == 0 or number == len(documents):
                 print(f"Processed {number}/{len(documents)}: {document['id']}", flush=True)
@@ -166,7 +171,7 @@ def main() -> None:
 
         run = {
             "stage": "first_pass",
-            "mode": "rules_and_spacy" if use_spacy else "rules_only",
+            "mode": "spacy_only" if args.spacy_only else ("rules_and_spacy" if use_spacy else "rules_only"),
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "config": config,
             "rules_only_override": args.rules_only,

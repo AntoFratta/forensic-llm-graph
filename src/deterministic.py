@@ -295,7 +295,7 @@ def _extract_times(text: str, entities: list) -> list:
     return times
 
 
-def _extract_nlp(text: str, doc) -> list:
+def _extract_nlp(text: str, doc, *, raw_spans: bool = False) -> list:
     """Map spaCy entity spans to project labels without changing their offsets.
 
     ORG includes institutions as well as companies. Spans without a recognized
@@ -304,19 +304,22 @@ def _extract_nlp(text: str, doc) -> list:
     """
     if doc.text != text:
         raise ValueError("The NLP component must preserve the original text.")
-    labels = {"PER": "PERSON", "PERSON": "PERSON", "LOC": "LOCATION",
+    labels = {"PER": "PERSON", "PERSON": "PERSON", "ORG": "COMPANY", "LOC": "LOCATION",
               "GPE": "LOCATION", "FAC": "LOCATION"}
     has_pos = doc.has_annotation("POS")
     result = []
     for span in doc.ents:
         label = labels.get(span.label_)
-        reasons = ()
-        if span.label_ == "ORG":
-            label = "COMPANY"
-            if not _COMPANY_SUFFIX.search(span.text):
-                reasons = ("organization_not_necessarily_company",)
         if not label:
             continue
+        if raw_spans:
+            candidate = _entity(text, span.start_char, span.end_char, label, "spacy:ner")
+            candidate["nlp_label"] = span.label_
+            result.append(candidate)
+            continue
+        reasons = ()
+        if span.label_ == "ORG" and not _COMPANY_SUFFIX.search(span.text):
+            reasons = ("organization_not_necessarily_company",)
         candidate = _entity(text, span.start_char, span.end_char, label, "spacy:ner", reasons)
         candidate["nlp_label"] = span.label_
         if label in {"PERSON", "LOCATION"}:
@@ -458,7 +461,7 @@ def _finish_entities(result: list) -> list:
     return ordered
 
 
-def extract_entities(text: str, nlp=None, *, doc=None) -> list:
+def extract_entities(text: str, nlp=None, *, doc=None, spacy_only: bool = False) -> list:
     """Return first-pass candidates for one complete document.
 
     Args:
@@ -466,6 +469,7 @@ def extract_entities(text: str, nlp=None, *, doc=None) -> list:
         nlp: Loaded Italian spaCy pipeline, or None to run only explicit rules.
         doc: Already processed spaCy Doc, for use with nlp.pipe. Supply either
             nlp or doc; passing a Doc avoids processing the same text twice.
+        spacy_only: Return the model's original spans mapped to project labels.
 
     Returns:
         Candidate dictionaries sorted by character position. Each contains its
@@ -482,6 +486,10 @@ def extract_entities(text: str, nlp=None, *, doc=None) -> list:
         raise ValueError("Supply either nlp or doc, not both.")
     if nlp is not None:
         doc = nlp(text)
+    if spacy_only:
+        if doc is None:
+            raise ValueError("spaCy-only extraction requires a processed document.")
+        return _extract_nlp(text, doc, raw_spans=True)
 
     entities = _extract_rules(text)
     entities.extend(_extract_times(text, entities))

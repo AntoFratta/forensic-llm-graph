@@ -19,6 +19,7 @@
     "max_review_fraction": 0.2,
     "max_review_passages": 100
   },
+  "test_review_budget": 30,
   "llm": {
     "model": "Qwen/Qwen3-8B",
     "revision": "b968826d9c46dd6066d109eabc6255188de91218",

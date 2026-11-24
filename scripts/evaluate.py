@@ -143,7 +143,9 @@ def replay_validation(hybrid: dict, documents: list) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--reference", required=True)
+    parser.add_argument("--allow-model-reference", action="store_true", help="Score against a model-annotated diagnostic test.")
     parser.add_argument("--baseline", required=True, help="Recorded first-pass JSON.")
+    parser.add_argument("--spacy-only", help="Optional separate first-pass JSON from --spacy-only.")
     parser.add_argument("--hybrid", help="Optional model output on exactly these reference passages.")
     parser.add_argument("--calibrate-routing", action="store_true")
     parser.add_argument("--replay-validation", action="store_true",
@@ -155,7 +157,7 @@ def main() -> None:
     try:
         output_path = project_path(args.output)
         config_output = project_path(args.calibrated_config) if args.calibrated_config else None
-        inputs = {project_path(p) for p in (args.reference, args.baseline, args.hybrid) if p}
+        inputs = {project_path(p) for p in (args.reference, args.baseline, args.hybrid, args.spacy_only) if p}
         for target in (output_path, config_output):
             if target and (target in inputs or target.suffix != ".json"):
                 raise ValueError("Use JSON outputs distinct from every input.")
@@ -169,18 +171,25 @@ def main() -> None:
             raise ValueError("Validation replay requires --hybrid development output.")
         if config_output and not args.calibrate_routing:
             raise ValueError("--calibrated-config requires --calibrate-routing.")
-        reference, reference_hash = load_reference(project_path(args.reference))
+        reference, reference_hash = load_reference(project_path(args.reference), allow_model_reference=args.allow_model_reference)
         if (args.calibrate_routing or args.replay_validation) and reference["split"] != "development":
             raise ValueError("Never calibrate on test data.")
         baseline, baseline_hash = load_first_pass(project_path(args.baseline))
         identifiers = {u["document_id"] for u in reference["units"]}
         documents = [d for d in baseline["documents"] if d["id"] in identifiers]
         report = {"stage": "reference_evaluation", "split": reference["split"],
+                  "reference_status": reference.get("status", "human_reviewed"),
                   "reference_sha256": reference_hash, "baseline_sha256": baseline_hash,
                   "evaluation_script_sha256": hashlib.sha256(Path(__file__).read_bytes().replace(b"\r\n", b"\n")).hexdigest(),
                   "metrics": {"first_pass": score_reference(reference, documents)},
                   "limitations": ["Small source-balanced reference, not population-representative accuracy.",
                                   "Undefined metrics are null; inspect category support before interpreting F1."]}
+        if args.spacy_only:
+            raw, raw_hash = load_first_pass(project_path(args.spacy_only))
+            if raw["run"].get("mode") != "spacy_only":
+                raise ValueError("--spacy-only requires raw spaCy predictions.")
+            report["spacy_only_sha256"] = raw_hash
+            report["metrics"]["spacy_only"] = score_reference(reference, raw["documents"])
         if args.hybrid:
             hybrid_path = project_path(args.hybrid)
             hybrid = json.loads(hybrid_path.read_text(encoding="utf-8-sig"))

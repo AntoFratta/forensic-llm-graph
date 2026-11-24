@@ -72,6 +72,22 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["run"]["mode"], "rules_only")
         self.assertIsNone(result["run"]["spacy_batch_size"])
 
+    def test_spacy_only_preserves_raw_boundaries_and_skips_rules(self):
+        text = "Comune di Roma, email: anna@example.org"
+        self.documents[0]["text"] = text
+        self.input_path.write_text(json.dumps(self.documents), encoding="utf-8")
+        span = SimpleNamespace(label_="LOC", start_char=0, end_char=14, text="Comune di Roma")
+        self.nlp.pipe.side_effect = lambda texts, batch_size: (
+            SimpleNamespace(text=value, ents=[span] if value == text else [],
+                            has_annotation=lambda name: False) for value in texts
+        )
+        self.run_script("--spacy-only")
+        result = json.loads(self.output_path.read_text(encoding="utf-8"))
+        self.assertEqual(result["run"]["mode"], "spacy_only")
+        self.assertEqual(result["run"]["candidate_count"], 1)
+        entity, = result["documents"][0]["entities"]
+        self.assertEqual((entity["text"], entity["label"]), ("Comune di Roma", "LOCATION"))
+
     def test_incomplete_nlp_stream_does_not_write_results(self):
         self.nlp.pipe.side_effect = lambda texts, batch_size: iter([])
         with self.assertRaises(SystemExit):

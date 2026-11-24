@@ -155,17 +155,11 @@ python scripts/graph.py score-context --graph outputs/01_relation_graph.json --r
 
 ### Named entity recognition
 
-**Controlled NER comparison.** The methods were compared on the same 12 reviewed excerpts with 137 annotated mentions. Precision, recall and micro F1 require exact boundaries and labels. Each hybrid variant selected three excerpts under the same budget.
+**Controlled NER comparison.** The test covers 50 complete documents (26 DICE articles, 20 ReDIt forms and four synthetic texts), partitioned into 88 passages. The reference contains 890 model-annotated mentions. The comparison scores raw spaCy, rules plus spaCy, and selective Qwen review with and without perplexity. Each Qwen strategy has a budget of 30 passages. All four methods are evaluated on the entire reference using exact boundaries and labels. Results are pending.
 
-| Method | Precision | Recall | Micro F1 |
-| --- | ---: | ---: | ---: |
-| Rules and spaCy | 63.70% | 62.77% | 63.24% |
-| Selective Qwen review without perplexity | 62.14% | 63.50% | 62.82% |
-| Selective Qwen review with perplexity | 64.44% | 63.50% | 63.97% |
+Generate the raw spaCy predictions on the test documents with `run_pipeline.py --spacy-only`. Pass this output to `evaluate.py --spacy-only` alongside the baseline and the hybrid comparison. For this model-annotated reference, both the hybrid runner and the scorer take `--allow-model-reference`.
 
-Both Qwen strategies selected the same excerpts from the source collections and scored 67.66% micro F1 on that part of the test. Perplexity broke a tie between synthetic passages, changing which passage Qwen reviewed and accounting for the difference between the two overall scores.
-
-**Full-corpus NER, run `05`.** Minerva scored 28,907 passages. Qwen returned 81 fully usable responses, 18 partially usable responses and one unusable response across 100 passages. The hybrid pass changed predictions in 29 documents. All 12 excerpts from the controlled test fell outside the review selection in this run, so their micro F1 stayed at the first-pass score of 63.24%.
+**Full-corpus NER, run `05`.** Minerva scored 28,907 passages. Qwen returned 81 fully usable responses, 18 partially usable responses and one unusable response across 100 passages. The hybrid pass changed predictions in 29 documents.
 
 **NER review on selected passages.** A separate diagnostic sample of 12 passages from DICE and ArchivioAntimafia was drawn from those selected for Qwen in the full-corpus run. On that sample, micro F1 rose from 29.03% before review to 40.00% after review.
 
