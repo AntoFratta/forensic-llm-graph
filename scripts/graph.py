@@ -19,7 +19,7 @@ from src.graph_queries import inspect_graph, score_context
 from src.language_models import load_model
 from src.relation_graph import SUBJECT_LABELS, build_graph
 from src.relation_review import (
-    CONTEXT_MAX_NEW_TOKENS,
+    attach_context_mentions,
     load_review_relations,
     review_relations,
     select_context_passages,
@@ -58,7 +58,8 @@ def load_ner(path: Path) -> tuple[dict, list, str]:
     return run, data["documents"], fingerprint
 
 
-def prepare(input_path: Path, reference_path: Path | None, limit: int, *, context: bool = False) -> dict:
+def prepare(input_path: Path, reference_path: Path | None, limit: int, *, context: bool = False,
+            selection_path: Path | None = None) -> dict:
     """Select passages and record the input and code used to produce the plan."""
     if limit < 1:
         raise ValueError("The passage budget must be positive.")
@@ -71,16 +72,46 @@ def prepare(input_path: Path, reference_path: Path | None, limit: int, *, contex
         if reference["input_sha256"] != input_hash:
             raise ValueError("The reference must use the same saved NER input.")
         units = reference["units"]
-    if context:
+    provenance = {}
+    if selection_path is not None:
+        if not context or reference_path is not None:
+            raise ValueError("--reuse-selection requires --context on a corpus plan.")
+        content = selection_path.read_bytes()
+        previous = json.loads(content.decode("utf-8-sig"))
+        meta = previous["run"]
+        if (meta.get("stage") != "relation_review_plan" or meta.get("profile") != "context"
+                or meta.get("scope") != "corpus" or meta.get("input_sha256") != input_hash):
+            raise ValueError("The saved context selection must match this NER input.")
+        rows = previous["passages"]
+        if (len(rows) != meta["selected_passages"] or len(rows) > limit
+                or len({p["id"] for p in rows}) != len(rows)):
+            raise ValueError("Invalid selection count or duplicate passage.")
+        by_id = {d["id"]: d for d in documents}
+        passages = []
+        for row in rows:
+            doc = by_id.get(row["document_id"])
+            start, left, right, end = (row[k] for k in ("start", "core_start", "core_end", "end"))
+            if (doc is None or not all(type(n) is int for n in (start, left, right, end))
+                    or not 0 <= start <= left < right <= end <= len(doc["text"])
+                    or row["id"] != f"{doc['id']}@{left}:{right}" or row["source"] != doc["source"]
+                    or row["text"] != doc["text"][start:end] or row["text_sha256"] != text_hash(row["text"])):
+                raise ValueError("A frozen passage differs from its original document.")
+            passages.append({k: row[k] for k in ("id", "source", "document_id", "start", "end",
+                                                  "core_start", "core_end", "text")})
+        attach_context_mentions(passages, by_id)
+        eligible = meta["eligible_passages"]
+        provenance["selection_plan_sha256"] = hashlib.sha256(content).hexdigest()
+    elif context:
         passages, eligible = select_context_passages(documents, core, padding, limit, units)
     else:
         passages, eligible = select_relation_passages(documents, core, padding, limit, units)
     return {"run": {"stage": "relation_review_plan", "input_sha256": input_hash,
+                    "review_mode": "direct_proposals" if context else "roles",
                     "code_sha256": graph_code_hash(with_review=True),
                     "profile": "context" if context else "legacy",
                     "max_passages": limit,
                     "scope": "reference_diagnostic" if units is not None else "corpus",
-                    "eligible_passages": eligible, "selected_passages": len(passages)},
+                    "eligible_passages": eligible, "selected_passages": len(passages), **provenance},
             "passages": [{**p, "text_sha256": text_hash(p["text"])} for p in passages]}
 
 
@@ -108,8 +139,6 @@ def run_review(plan_path: Path, config_path: Path, *, checkpoint_path: Path | No
     config = json.loads(config_path.read_text(encoding="utf-8-sig"))
     validate_config(config)
     settings = dict(config["llm"])
-    if run.get("profile") == "context":
-        settings["max_new_tokens"] = min(settings["max_new_tokens"], CONTEXT_MAX_NEW_TOKENS)
     plan_hash = hashlib.sha256(content).hexdigest()
     model_info = {"model": settings["model"], "revision": settings["revision"]}
     metadata = {**run, "stage": "relation_review", "plan_sha256": plan_hash, "settings": settings}
@@ -296,6 +325,7 @@ def main() -> None:
     plan = commands.add_parser("prepare", help="Select passages and save a Qwen review plan.")
     plan.add_argument("--input", required=True, help="Saved first-pass or hybrid NER JSON.")
     plan.add_argument("--reference", help="Optional reference JSON. Uses only passage text and offsets.")
+    plan.add_argument("--reuse-selection", help="Reuse the exact passages of a saved context corpus plan.")
     plan.add_argument("--max-passages", type=int, default=100)
     plan.add_argument("--context", action="store_true", help="Select passages for broader contextual facts.")
     plan.add_argument("--output", required=True)
@@ -341,7 +371,7 @@ def main() -> None:
 
     try:
         output = project_path(args.output)
-        input_names = ("input", "reference", "plan", "config", "relation_reviews", "graph", "links")
+        input_names = ("input", "reference", "plan", "config", "relation_reviews", "graph", "links", "reuse_selection")
         input_paths = {
             name: project_path(value)
             for name in input_names
@@ -355,7 +385,7 @@ def main() -> None:
         checkpoint = None
         if args.command == "prepare":
             result = prepare(input_paths["input"], input_paths.get("reference"), args.max_passages,
-                             context=args.context)
+                             context=args.context, selection_path=input_paths.get("reuse_selection"))
         elif args.command == "review":
             checkpoint = output.with_suffix(".partial.json")
             if checkpoint in input_paths.values():

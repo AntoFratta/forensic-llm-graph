@@ -15,7 +15,7 @@ This project helps readers reconstruct the context of Italian forensic and legal
 
 1. **Extract entities.** Rules and Italian spaCy process every document. The ten labels are `PERSON`, `COMPANY`, `ROLE`, `LOCATION`, `EMAIL`, `PHONE`, `TAX_CODE`, `VAT_NUMBER`, `BANK_ACCOUNT` and `TIME`. Banking mentions include IBANs and other account numbers.
 2. **Select and review NER passages.** Minerva measures how surprising each passage is to the model using perplexity. Passages have cores of about 800 characters and normally up to 160 characters of context on either side. Context is extended when needed to keep a first-pass candidate intact. Selection combines perplexity with signals such as overlapping candidates and possible omissions. The review budget is 20% of passages, rounded up and capped at 100. Qwen reviews the highest-priority eligible passages within that budget. The pipeline checks proposed labels and spans against the text before merging them with the first pass.
-3. **Build the relation graph.** The pipeline applies text-grounded rules to all documents and sends up to 100 selected passages to Qwen by default. Selection covers available contextual relation and event families, then rotates through the sources. Each passage can contain up to four anchored candidates, prioritising wording or attachments that the rules alone would omit. Qwen accepts or rejects each candidate with a constrained binary response. Saved decisions identify the predicate and argument spans, which are checked again before graph construction. For roles, employment and legal representation, Qwen can also propose endpoints that the validator checks against the original wording. [Relation review](src/relation_review.py) · [Contextual facts](src/context_facts.py)
+3. **Build the relation graph.** The pipeline applies text-grounded rules to all documents and sends up to 100 selected passages to Qwen by default. Selection covers available contextual relation and event families, then rotates through the sources. Qwen reads each selected passage and proposes contextual relations and events directly, quoting the predicate and its arguments and indicating whether the text asserts, reports, hypothesizes or negates the fact. The validator checks types, roles and original offsets. A second Qwen check assesses each grounded proposal against the passage. Role, employment and representation proposals use numbered predicate cues and endpoint validation. [Relation review](src/relation_review.py) · [Contextual facts](src/context_facts.py)
 
 The graph creates a subgraph for every input document. `MENTIONED_IN` links a subject to the document where it appears. `CO_OCCURS_WITH` records that two subjects appear in the same passage. `EXPLICIT_RELATION` represents appointments, employment and legal representation. `CONTEXT_RELATION` covers directed links such as a person to their place of residence or an account holder to a bank account. A `FACT` node represents an event or a statement and connects the participants to their roles, with place, time or speaker when the text supports them. Evidence records the character offsets of the source text and, for contextual claims, whether the text states, attributes, hypothesises or negates them. [Graph construction](src/relation_graph.py)
 
@@ -123,6 +123,8 @@ python scripts/graph.py build --context --input outputs/01_ner_corpus.json --rel
 
 Add `--revalidate-reviews` and choose a new output filename to apply updated graph validation to existing responses. Contextual decisions are matched against their saved predicate and argument offsets. Use the original revision to replay older contextual decisions recorded only by position in a candidate list.
 
+To compare review methods on identical passages, pass `--reuse-selection previous_plan.json` to `graph.py prepare --context` with the same saved NER input. The planner verifies the input fingerprint, passage text and offsets, then reconstructs the review inputs from the original documents.
+
 <details>
 <summary>Run the pipeline from the command line</summary>
 
@@ -174,20 +176,9 @@ Generate the raw spaCy predictions on the test documents with `run_pipeline.py -
 
 ### Final relation graph
 
-The graph comparison uses the same full-corpus NER predictions for both variants. Rules processed all 10,654 documents in both variants. In run `10`, Qwen reviewed 100 of 2,596 eligible passages across the five collections. The review stage recorded 71 valid, eight partial and 21 invalid responses. The final graph, run `11`, was built on CPU by revalidating those saved responses with the updated validator. [Qwen review revision](https://github.com/AntoFratta/forensic-llm-graph/commit/fe4e595671914339bf1a7d0411233d477486770a) · [Final validation revision](https://github.com/AntoFratta/forensic-llm-graph/commit/1c783236159fd6902cebee563944cb87116fbdf6)
+The graph test uses the saved full-corpus NER predictions and the fixed selection of 100 passages. Rules process every document. The comparison measures which edges and event nodes the validated Qwen proposals add, and evaluates the extracted facts against the reference. Results for the direct-proposal run are pending.
 
-| Graph component | Rules only | Final graph | Added by Qwen |
-| --- | ---: | ---: | ---: |
-| Document nodes | 10,654 | 10,654 | 0 |
-| Contextual relation edges | 408 | 432 | 24 |
-| Fact nodes | 632 | 640 | 8 |
-| Role, employment and legal representation edges | 106 | 109 | 3 |
-
-Qwen contributed 27 additional relation edges and eight fact nodes. It also confirmed 37 occurrences already extracted by the rules. The final graph has **127,399 nodes** and **520,812 edges**, including 116,100 mention edges and 402,555 co-occurrence edges. Three case nodes account for 24 document-to-case links. One shared event links two documents, and one shared identity connects subject nodes from two documents. A separate list records 304 candidate document pairs for inspection.
-
-**Diagnostic evaluation.** Both graph variants recovered the three annotated contextual facts, linked the five positive document pairs and kept the three negative pairs separate. The reference includes links specified in the graph configuration, so these results describe behaviour on the checked examples. News articles make up about 97% of the corpus, and the annotated samples cover few judicial cases.
-
-The predictions, annotations and detailed results for the thesis runs are kept in the local research workspace. The public repository provides the code and source manifest for generating a new corpus and graph. An exact CPU rebuild of the recorded final graph requires the saved NER predictions from run `05`, the relation responses from run `10` and the final validation revision with `--revalidate-reviews`. [NER evaluation revision](https://github.com/AntoFratta/forensic-llm-graph/commit/b20a42ba6620948c0f881bdcc2181aabb232e93b)
+The local research workspace holds the experiment inputs and outputs. A CPU rebuild uses the original NER file, the matching saved relation reviews, the graph configuration and the corresponding extraction code.
 
 ## Repository layout
 

@@ -217,11 +217,11 @@ def build_graph(documents: list, core_chars: int = 800, reviewed_relations: dict
                 if entity.get("source") != "rule:context":
                     by_span.setdefault(key, entity)
             for fact in extract_facts(document, list(contextual_by_span.values())):
-                facts[fact_key(fact)] = fact
+                facts[fact_key(fact), fact["assertion"]] = fact
                 for entity in fact["arguments"].values():
                     by_span.setdefault(_span_key(entity), entity)
             for fact in (reviewed_facts or {}).get(identifier, ()):
-                key = fact_key(fact)
+                key = fact_key(fact), fact["assertion"]
                 if key in facts:
                     facts[key]["qwen_reviewed"] = True
                 else:

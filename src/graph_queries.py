@@ -63,6 +63,8 @@ def score_context(graph: dict, reference: dict) -> dict:
             for ev in edge["evidence"]:
                 args = {"subject": {**ev["source_mention"], "label": source["label"]},
                         "object": {**ev["target_mention"], "label": target["label"]}}
+                if speaker := ev.get("speaker"):
+                    args["speaker"] = {**speaker, "label": nodes[speaker["subject"]]["label"]}
                 occurrence_facts[ev["document_id"]].add(_fact_signature(
                     edge["relation"], ev["predicate_start"], ev["predicate_end"], ev["assertion"], args))
         elif kind == "FACT_ARGUMENT":

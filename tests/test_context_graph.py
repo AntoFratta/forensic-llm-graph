@@ -1,14 +1,16 @@
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from scripts.graph import build_saved_graph, prepare, run_review
 from src.context_facts import context_mentions, reviewable_facts
 from src.graph_queries import inspect_graph, score_context
 from src.relation_graph import build_graph
-from src.relation_review import _fact_reference, parse_context_review, parse_relation_review, select_context_passages
+from src.relation_review import (_fact_reference, _parse_proposals, parse_context_review,
+                                 parse_relation_review, review_relations, select_context_passages)
 
 
 def document(identifier, text, mentions=(), **metadata):
@@ -25,6 +27,63 @@ def edges(graph, kind):
 
 
 class ContextGraphTests(unittest.TestCase):
+    def test_context_generation_proposes_a_fact_without_role_cues_or_listed_rule_candidates(self):
+        text = "Ada dimora a Bari."
+        passage = {"text": text, "start": 50, "core_start": 50, "core_end": 50 + len(text),
+                   "context_mentions": []}
+        item = {"kind": "residence", "predicate": "dimora a", "evidence": text,
+                "assertion": "asserted", "arguments": {"subject": {"text": "Ada", "label": "PERSON"},
+                                                        "object": {"text": "Bari", "label": "LOCATION"}}}
+        raw = json.dumps({"relations": [], "facts": [item]})
+        tokenizer, model, torch = MagicMock(), MagicMock(), MagicMock()
+        torch.inference_mode.side_effect = nullcontext
+        tokenizer.return_value["input_ids"].shape = (1, 30)
+        tokenizer.encode.side_effect = [[10], [11]]
+        tokenizer.decode.side_effect = [raw, "1"]
+        model.generation_config.eos_token_id = 0
+        with patch("src.relation_review.require_cuda", return_value=torch):
+            result = review_relations(passage, {"max_input_tokens": 3072, "max_new_tokens": 1536}, model, tokenizer)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["accepted_count"], 1)
+        fact, = parse_context_review(result["raw_response"], passage)["facts"]
+        self.assertEqual(fact["predicate_start"], 54)
+        self.assertEqual(fact["arguments"]["object"]["text"], "Bari")
+        self.assertEqual(model.generate.call_count, 2)
+
+    def test_new_proposals_add_unlisted_relations_and_events_with_quoted_participants(self):
+        cases = [
+            ("Lea Blu dimora stabilmente a Roma.", "residence", "dimora stabilmente a",
+             {"subject": ("Lea Blu", "PERSON"), "object": ("Roma", "LOCATION")}),
+            ("Ada Neri sborsò cinquanta euro.", "payment", "sborsò",
+             {"subject": ("Ada Neri", "PERSON"), "amount": ("cinquanta euro", "AMOUNT")}),
+        ]
+        for text, kind, predicate, arguments in cases:
+            with self.subTest(kind=kind):
+                doc = document("example", text)
+                passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text),
+                           "context_mentions": context_mentions(doc)}
+                self.assertFalse(reviewable_facts(passage))
+                item = {"kind": kind, "evidence": text, "predicate": predicate, "assertion": "asserted",
+                        "arguments": {r: {"text": t, "label": l} for r, (t, l) in arguments.items()}}
+                raw = json.dumps({"relations": [], "facts": [item, item]})
+                proposed, = _parse_proposals(raw, passage)["facts"]
+                vote = {"reference": _fact_reference(proposed), "answer": "1"}
+                saved = {"proposal_response": raw, "checks": [vote]}
+                parsed = parse_context_review(json.dumps(saved), passage)
+                self.assertEqual(parsed["status"], "ok")
+                graph = build_graph([doc], context=True, reviewed_facts={"example": parsed["facts"]})
+                evidence_type = "CONTEXT_RELATION" if kind == "residence" else "STATED_IN"
+                edge, = edges(graph, evidence_type)
+                ev, = edge["evidence"]
+                self.assertEqual(text[ev["predicate_start"]:ev["predicate_end"]], predicate)
+                self.assertEqual(ev["method"], "qwen")
+                vote["answer"] = "0"
+                self.assertFalse(parse_context_review(json.dumps(saved), passage)["facts"])
+                vote["reference"][1] += 1
+                self.assertEqual(parse_context_review(json.dumps(saved), passage)["status"], "invalid_response")
+                item["arguments"]["subject"]["text"] = "Un nome assente"
+                self.assertTrue(_parse_proposals(json.dumps({"relations": [], "facts": [item]}), passage)["errors"])
+
     def test_meeting_keeps_participants_place_and_date_on_one_fact(self):
         doc = document("a", "Maria Rossi ha incontrato Luca Bianchi e Ada Neri a Roma il 12 maggio.",
                        [("Maria Rossi", "PERSON"), ("Luca Bianchi", "PERSON"), ("Ada Neri", "PERSON"),

@@ -469,3 +469,90 @@ def parse_fact(item: dict, passage: dict, locate) -> dict:
         # Keep a rule-grounded argument even if the model omits an optional attribute.
         return _reviewed_fact(fact, base)
     raise ValueError("The fact arguments or direction are unsupported by the selected wording.")
+
+
+# A directed edge uses the semantic subject and object even in passive wording.
+DIRECT_ARGUMENTS = {
+    "family": ({"PERSON"}, {"PERSON"}),
+    "residence": ({"PERSON"}, {"LOCATION"}),
+    "registered_office": ({"COMPANY", "ORGANIZATION"}, {"LOCATION"}),
+    "account_holder": (SUBJECTS | {"PARTY", "ORGANIZATION"}, {"BANK_ACCOUNT"}),
+    "contact": (SUBJECTS | {"ORGANIZATION"}, {"EMAIL", "PHONE"}),
+    "identifier": (SUBJECTS | {"ORGANIZATION"}, {"TAX_CODE", "VAT_NUMBER"}),
+}
+ACTORS = SUBJECTS | {"PARTY", "ORGANIZATION"}
+EVENT_ARGUMENTS = {"subject": ACTORS, "object": ACTORS | {"BANK_ACCOUNT"}, "speaker": ACTORS,
+                   "time": {"TIME"}, "place": {"LOCATION"}}
+
+
+def ground_proposal(item: dict, passage: dict, locate) -> dict:
+    """Anchor a typed model proposal independently of rule candidates."""
+    fields = {"kind", "predicate", "evidence", "assertion", "arguments"}
+    if not isinstance(item, dict) or set(item) != fields:
+        raise ValueError("Each fact needs kind, evidence, predicate, assertion and arguments.")
+    kind, assertion = item["kind"], item["assertion"]
+    if assertion not in ("asserted", "negated", "hypothetical", "reported"):
+        raise ValueError("Unknown assertion.")
+    if kind in DIRECT_ARGUMENTS:
+        subject, target = DIRECT_ARGUMENTS[kind]
+        allowed = {"subject": subject, "object": target, "speaker": ACTORS}
+        required = {"subject", "object"}
+    elif kind in EVENTS or kind == "action":
+        allowed = dict(EVENT_ARGUMENTS)
+        required = {"subject"}
+        if kind == "statement":
+            required = {"speaker"}
+            del allowed["subject"]
+        if kind in ("meeting", "communication", "agreement", "action"):
+            required.add("object")
+        if kind == "birth":
+            allowed["subject"] = {"PERSON"}
+            required.add("place")
+        if kind == "delivery":
+            allowed["item"] = {"OBJECT"}
+        if kind == "payment":
+            allowed["amount"] = {"AMOUNT"}
+    else:
+        raise ValueError("Unknown contextual fact type.")
+    args = item["arguments"]
+    if not isinstance(args, dict) or not required <= args.keys():
+        raise ValueError("Missing required participants.")
+    if kind == "delivery" and not ({"item", "object"} & args.keys()):
+        raise ValueError("A delivery needs a recipient or item.")
+    text, base = passage["text"], passage["start"]
+    lo, hi = locate(item["evidence"], text)
+    quote = text[lo:hi]
+    left, right = locate(item["predicate"], quote)
+    start, end = lo + left, lo + right
+    if not passage["core_start"] <= base + start < passage["core_end"]:
+        raise ValueError("The predicate must start in the selected core.")
+    if CLAUSE_BOUNDARY.search(quote.rstrip().rstrip(".!?")):
+        raise ValueError("Quote a single clause containing the predicate and its arguments.")
+    if not any(ch.isalpha() for ch in text[start:end]):
+        raise ValueError("Quote the words expressing the predicate.")
+    mentions = {mention_key(e): e for e in passage["context_mentions"]}
+    arguments = {}
+    occupied = [(left, right)]
+    for role, value in args.items():
+        slot = role
+        if kind not in DIRECT_ARGUMENTS and re.fullmatch(r"object_(?:[2-9]|[1-9]\d+)", role) and "object" in args:
+            slot = "object"
+        if (slot not in allowed or not isinstance(value, dict) or set(value) != {"text", "label"}
+                or value["label"] not in allowed[slot]):
+            raise ValueError(f"Invalid role or participant category: {role}.")
+        a, b = locate(value["text"], quote)
+        if any(a < y and x < b for x, y in occupied):
+            raise ValueError("Argument and predicate spans must be distinct.")
+        occupied.append((a, b))
+        label, original = value["label"], quote[a:b]
+        key = base + lo + a, base + lo + b, label
+        if label in SUBJECTS and not is_subject_candidate(original, label):
+            raise ValueError("Incompatible subject mention.")
+        arguments[role] = mentions.get(key) or {
+            "text": original, "label": label, "start": key[0], "end": key[1],
+            "mention_kind": "name" if label not in {"OBJECT", "PARTY", "AMOUNT"} and
+                            (label not in ACTORS or original[:1].isupper()) else "description",
+            "source": "qwen", "needs_review": True,
+        }
+    return {"kind": kind, "assertion": assertion, "method": "qwen", "arguments": arguments,
+            "start": base + lo, "end": base + hi, "predicate_start": base + start, "predicate_end": base + end}
