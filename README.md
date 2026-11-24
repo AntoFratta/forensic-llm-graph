@@ -155,9 +155,18 @@ python scripts/graph.py score-context --graph outputs/01_relation_graph.json --r
 
 ### Named entity recognition
 
-**Controlled NER comparison.** The test covers 50 complete documents (26 DICE articles, 20 ReDIt forms and four synthetic texts), partitioned into 88 passages. The reference contains 890 model-annotated mentions. The comparison scores raw spaCy, rules plus spaCy, and selective Qwen review with and without perplexity. Each Qwen strategy has a budget of 30 passages. All four methods are evaluated on the entire reference using exact boundaries and labels. Results are pending.
+**Controlled NER comparison.** The test covers 50 documents annotated in full (26 DICE articles, 20 ReDIt forms and four synthetic texts), partitioned into 88 passages. All four methods were evaluated against the same 890 entity mentions. A prediction counted as correct when both its boundaries and its label matched the reference. Each Qwen strategy selected 30 passages, with 24 in common.
 
-Generate the raw spaCy predictions on the test documents with `run_pipeline.py --spacy-only`. Pass this output to `evaluate.py --spacy-only` alongside the baseline and the hybrid comparison. For this model-annotated reference, both the hybrid runner and the scorer take `--allow-model-reference`.
+| Method | Precision | Recall | Micro F1 |
+| --- | ---: | ---: | ---: |
+| spaCy only | 44.72% | 30.45% | 36.23% |
+| Rules and spaCy | 59.15% | 56.29% | 57.69% |
+| Selective Qwen review without perplexity | 56.74% | 58.20% | 57.46% |
+| Selective Qwen review with perplexity | 55.34% | 58.76% | 57.00% |
+
+Rules and spaCy achieved the highest micro F1 on this sample. Qwen with perplexity recovered 523 reference mentions compared with 501 for rules and spaCy, while false positives increased from 346 to 422.
+
+Generate the raw spaCy predictions on the test documents with `run_pipeline.py --spacy-only`. Pass this output to `evaluate.py --spacy-only` alongside the baseline and the hybrid comparison. To reproduce this run, pass `--allow-model-reference` to both the hybrid runner and the scorer.
 
 **Full-corpus NER, run `05`.** Minerva scored 28,907 passages. Qwen returned 81 fully usable responses, 18 partially usable responses and one unusable response across 100 passages. The hybrid pass changed predictions in 29 documents.
 
