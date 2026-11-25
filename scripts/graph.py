@@ -34,7 +34,7 @@ def graph_code_hash(with_review: bool = False) -> str:
     files = ["src/explicit_relations.py", "src/relation_graph.py", "src/passages.py", "src/deterministic.py",
              "src/context_facts.py", "src/document_links.py", "src/llm_filter.py"]
     if with_review:
-        files.append("src/relation_review.py")
+        files.extend(["src/relation_review.py", "src/compact_review.py", "src/guided_review.py"])
     for name in files:
         digest.update(name.encode("utf-8"))
         digest.update((PROJECT_ROOT / name).read_bytes().replace(b"\r\n", b"\n"))
@@ -106,7 +106,7 @@ def prepare(input_path: Path, reference_path: Path | None, limit: int, *, contex
     else:
         passages, eligible = select_relation_passages(documents, core, padding, limit, units)
     return {"run": {"stage": "relation_review_plan", "input_sha256": input_hash,
-                    "review_mode": "direct_proposals" if context else "roles",
+                    "review_mode": "split_guided_proposals" if context else "roles",
                     "code_sha256": graph_code_hash(with_review=True),
                     "profile": "context" if context else "legacy",
                     "max_passages": limit,
@@ -143,6 +143,7 @@ def run_review(plan_path: Path, config_path: Path, *, checkpoint_path: Path | No
     model_info = {"model": settings["model"], "revision": settings["revision"]}
     metadata = {**run, "stage": "relation_review", "plan_sha256": plan_hash, "settings": settings}
     reviews = []
+    pending = None
     if checkpoint_path is not None and checkpoint_path.is_file():
         saved = json.loads(checkpoint_path.read_text(encoding="utf-8"))
         reviews = saved["reviews"]
@@ -150,6 +151,9 @@ def run_review(plan_path: Path, config_path: Path, *, checkpoint_path: Path | No
                 or [row["id"] for row in reviews] != [p["id"] for p in passages[:len(reviews)]]):
             raise ValueError("The review checkpoint does not match this plan and configuration.")
         model_info = saved["run"]["model"]
+        pending = saved.get("pending_decisions")
+        if pending is not None and (len(reviews) >= len(passages) or pending["id"] != passages[len(reviews)]["id"]):
+            raise ValueError("Saved decisions do not belong to the next passage.")
         print(f"Resuming with {len(reviews)}/{len(passages)} passages already reviewed.", flush=True)
 
     def result() -> dict:
@@ -169,8 +173,18 @@ def run_review(plan_path: Path, config_path: Path, *, checkpoint_path: Path | No
         model, tokenizer, model_info = load_model(settings, quantized=True)
         for number, passage in enumerate(passages[len(reviews):], len(reviews) + 1):
             started = perf_counter()
-            review = review_relations(passage, settings, model, tokenizer)
-            seconds = round(perf_counter() - started, 2)
+            elapsed = pending["elapsed_seconds"] if pending else 0
+            if checkpoint_path is not None and "context_mentions" in passage:
+                def save_decisions(state):
+                    progress = {"id": passage["id"], "elapsed_seconds": perf_counter() - started, "state": state}
+                    write_result(checkpoint_path, {**result(), "pending_decisions": progress})
+
+                review = review_relations(passage, settings, model, tokenizer, save_decisions=save_decisions,
+                                          decision_checkpoint=pending["state"] if pending else None)
+            else:
+                review = review_relations(passage, settings, model, tokenizer)
+            seconds = round(elapsed + perf_counter() - started, 2)
+            pending = None
             reviews.append({**{key: val for key, val in passage.items() if key != "text"}, **review,
                             "review_seconds": seconds})
             if checkpoint_path is not None:

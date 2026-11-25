@@ -485,7 +485,16 @@ EVENT_ARGUMENTS = {"subject": ACTORS, "object": ACTORS | {"BANK_ACCOUNT"}, "spea
                    "time": {"TIME"}, "place": {"LOCATION"}}
 
 
-def ground_proposal(item: dict, passage: dict, locate) -> dict:
+def locate_participant(value, quote, offset, span, locate):
+    if span is None:
+        return locate(value, quote)
+    start, end = span[0] - offset, span[1] - offset
+    if not 0 <= start < end <= len(quote) or quote[start:end] != value:
+        raise ValueError("The indexed mention does not match the original evidence.")
+    return start, end
+
+
+def ground_proposal(item: dict, passage: dict, locate, *, argument_spans=None, predicate_span=None) -> dict:
     """Anchor a typed model proposal independently of rule candidates."""
     fields = {"kind", "predicate", "evidence", "assertion", "arguments"}
     if not isinstance(item, dict) or set(item) != fields:
@@ -522,7 +531,7 @@ def ground_proposal(item: dict, passage: dict, locate) -> dict:
     text, base = passage["text"], passage["start"]
     lo, hi = locate(item["evidence"], text)
     quote = text[lo:hi]
-    left, right = locate(item["predicate"], quote)
+    left, right = locate_participant(item["predicate"], quote, base + lo, predicate_span, locate)
     start, end = lo + left, lo + right
     if not passage["core_start"] <= base + start < passage["core_end"]:
         raise ValueError("The predicate must start in the selected core.")
@@ -540,7 +549,8 @@ def ground_proposal(item: dict, passage: dict, locate) -> dict:
         if (slot not in allowed or not isinstance(value, dict) or set(value) != {"text", "label"}
                 or value["label"] not in allowed[slot]):
             raise ValueError(f"Invalid role or participant category: {role}.")
-        a, b = locate(value["text"], quote)
+        span = argument_spans.get(role) if argument_spans else None
+        a, b = locate_participant(value["text"], quote, base + lo, span, locate)
         if any(a < y and x < b for x, y in occupied):
             raise ValueError("Argument and predicate spans must be distinct.")
         occupied.append((a, b))

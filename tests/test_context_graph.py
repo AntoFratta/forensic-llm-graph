@@ -6,10 +6,11 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from scripts.graph import build_saved_graph, prepare, run_review
+from src import guided_review
 from src.context_facts import context_mentions, reviewable_facts
 from src.graph_queries import inspect_graph, score_context
 from src.relation_graph import build_graph
-from src.relation_review import (_fact_reference, _parse_proposals, parse_context_review,
+from src.relation_review import (_fact_reference, _guided_answer, _passage_cues, _parse_proposals, parse_context_review,
                                  parse_relation_review, review_relations, select_context_passages)
 
 
@@ -27,14 +28,117 @@ def edges(graph, kind):
 
 
 class ContextGraphTests(unittest.TestCase):
+    def test_split_checkpoint_survives_interruption_and_truncated_additions(self):
+        doc = document("lease", "Lea Blu abita a Roma.", [("Lea Blu", "PERSON"), ("Roma", "LOCATION")])
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            ner, plan, checkpoint = [root / name for name in ("ner.json", "plan.json", "partial.json")]
+            ner.write_text(json.dumps({"run": {"stage": "hybrid"}, "documents": [doc]}), encoding="utf-8")
+            plan.write_text(json.dumps(prepare(ner, None, 1, context=True)), encoding="utf-8")
+            config = Path(__file__).resolve().parents[1] / "configs/hybrid.json"
+            def vote(facts, *args):
+                return [{"reference": _fact_reference(f), "answer": "1"} for f in facts]
+            def interrupt(prompt, *args):
+                if prompt.startswith(guided_review.DECISION_PROMPT):
+                    return {"status": "truncated", "raw_response": '{"decisions":[1],"facts":['}
+                self.assertTrue(checkpoint.exists())
+                raise RuntimeError("interrupted during additions")
+            def truncated(prompt, *args):
+                self.assertTrue(prompt.startswith(guided_review.ADDITION_PROMPT))
+                return {"status": "truncated", "raw_response": '{"facts":['}
+            with patch("scripts.graph.load_model", return_value=(None, None, {})), patch(
+                    "src.relation_review.require_cuda"), patch("src.relation_review._fact_responses", side_effect=vote):
+                with patch("src.relation_review._generate_reply", side_effect=interrupt), self.assertRaisesRegex(
+                        RuntimeError, "during additions"):
+                    run_review(plan, config, checkpoint_path=checkpoint)
+                saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+                self.assertEqual(saved["pending_decisions"]["state"]["checks"][0]["answer"], "1")
+                with patch("src.relation_review._generate_reply", side_effect=truncated):
+                    result = run_review(plan, config, checkpoint_path=checkpoint)
+            row, = result["reviews"]
+            self.assertEqual((row["status"], row["accepted_count"]), ("partial", 1))
+            self.assertNotIn("pending_decisions", json.loads(checkpoint.read_text(encoding="utf-8")))
+            fact, = parse_context_review(row["raw_response"], json.loads(plan.read_text())["passages"][0])["facts"]
+            self.assertEqual(fact["arguments"]["object"]["text"], "Roma")
+
+    def test_repeated_addition_cannot_override_a_rejected_candidate(self):
+        doc = document("lease", "Lea Blu abita a Roma.", [("Lea Blu", "PERSON"), ("Roma", "LOCATION")])
+        passage = {"text": doc["text"], "start": 0, "core_start": 0, "core_end": len(doc["text"]),
+                   "context_mentions": context_mentions(doc)}
+        q, = guided_review.questions(passage, _passage_cues)
+        def row(raw):
+            return {"question_sha256": q[3], "raw_response": json.dumps(raw), "status": "ok"}
+        fact, = _guided_answer("[1]", q, phase="decisions")["facts"]
+        payload = {"decision_responses": [row({"decisions": [1]})],
+                   "addition_responses": [row({"facts": q[1]["candidati"]})],
+                   "checks": [{"reference": _fact_reference(fact), "answer": "0"}]}
+        parsed = parse_context_review(json.dumps(payload), passage)
+        self.assertEqual((parsed["status"], parsed["facts"]), ("ok", []))
+        for raw in ('{"decisions":[1', '{"decisions":[]}', '{"decisions":[1,1]}'):
+            self.assertEqual(_guided_answer(raw, q, phase="decisions")["status"], "invalid_response")
+
+    def test_guided_decisions_correct_add_and_reject_using_only_the_source_clause(self):
+        text = "Ada Neri ha pagato 500 euro. Lia Belli abita a Roma."
+        doc = document("example", text, [("Ada Neri", "PERSON"), ("Lia Belli", "PERSON"), ("Roma", "LOCATION")])
+        passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text),
+                   "context_mentions": context_mentions(doc)}
+        pay, home = guided_review.questions(passage, _passage_cues)
+        self.assertEqual([c["kind"] for c in pay[1]["candidati"]], ["payment"])
+        self.assertEqual([c["kind"] for c in home[1]["candidati"]], ["residence"])
+        self.assertNotIn("Roma", pay[1]["frase"])
+        def parse(q, decisions, **fields):
+            return _guided_answer(json.dumps({"decisions": decisions, **fields}), q)
+        self.assertFalse(parse(pay, [0])["facts"])
+        self.assertFalse(parse(pay, [])["facts"])
+        self.assertEqual(parse(pay, [])["status"], "invalid_response")
+        args = {"subject": 1, "amount": ["500 euro", "AMOUNT"]}
+        corrected, = parse(pay, [{"arguments": args}])["facts"]
+        self.assertEqual(corrected["arguments"]["amount"]["start"], text.index("500 euro"))
+        self.assertFalse(parse(pay, [{"arguments": {**args, "subject": ["Lia Belli", "PERSON"]}}])["facts"])
+        self.assertEqual(parse(home, [1])["facts"][0]["predicate_start"], text.index("abita"))
+        extra = {"kind": "residence", "predicate": "abita", "assertion": "asserted",
+                 "arguments": {"subject": 1, "object": 2}}
+        self.assertEqual(parse(home, [0], facts=[extra])["facts"][0]["arguments"]["object"]["text"], "Roma")
+        old_signature = home[3]
+        home_raw = json.dumps({"decisions": [1]})
+        rows = [{"question_sha256": pay[3], "raw_response": json.dumps({"decisions": [0]})},
+                {"question_sha256": old_signature, "raw_response": home_raw}]
+        fact, = _guided_answer(home_raw, home)["facts"]
+        envelope = {"guided_responses": rows, "checks": [{"reference": _fact_reference(fact), "answer": "0"}]}
+        self.assertFalse(parse_context_review(json.dumps(envelope), passage)["facts"])
+        envelope["checks"][0]["answer"] = "1"
+        self.assertEqual(parse_context_review(json.dumps(envelope), passage)["status"], "ok")
+        rows[1]["question_sha256"] = pay[3]
+        self.assertEqual(parse_context_review(json.dumps(envelope), passage)["status"], "invalid_response")
+
+    def test_guided_failure_in_one_clause_retains_separate_verified_fact(self):
+        text = "Ada Neri abita a Bari. Lea Blu abita a Roma."
+        doc = document("example", text, [("Ada Neri", "PERSON"), ("Bari", "LOCATION"),
+                                         ("Lea Blu", "PERSON"), ("Roma", "LOCATION")])
+        passage = {"text": text, "start": 0, "core_start": 0, "core_end": len(text),
+                   "context_mentions": context_mentions(doc)}
+        def reply(raw, status="complete"):
+            return {"raw_response": raw, "status": status}
+        def confirm(proposals, *args):
+            return [{"reference": _fact_reference(f), "answer": "1"} for f in proposals]
+        with patch("src.relation_review.require_cuda"), patch("src.relation_review._fact_responses", side_effect=confirm), \
+                patch("src.relation_review._generate_reply", side_effect=[
+                    reply("{}", "truncated"), reply('{"decisions":[]}'), reply('{"decisions":[1]}'),
+                    reply('{"facts":[]}'), reply('{"facts":[]}')]) as generate:
+            result = review_relations(passage, {"max_new_tokens": 400, "validation_retries": 1}, None, None)
+        self.assertEqual(generate.call_count, 5)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["accepted_count"], 1)
+        fact, = parse_context_review(result["raw_response"], passage)["facts"]
+        self.assertEqual(fact["arguments"]["object"]["text"], "Roma")
+
     def test_context_generation_proposes_a_fact_without_role_cues_or_listed_rule_candidates(self):
         text = "Ada dimora a Bari."
         passage = {"text": text, "start": 50, "core_start": 50, "core_end": 50 + len(text),
                    "context_mentions": []}
-        item = {"kind": "residence", "predicate": "dimora a", "evidence": text,
-                "assertion": "asserted", "arguments": {"subject": {"text": "Ada", "label": "PERSON"},
-                                                        "object": {"text": "Bari", "label": "LOCATION"}}}
-        raw = json.dumps({"relations": [], "facts": [item]})
+        item = {"kind": "residence", "predicate": "dimora a", "assertion": "asserted",
+                "arguments": {"subject": ["Ada", "PERSON"], "object": ["Bari", "LOCATION"]}}
+        raw = json.dumps({"facts": [item]})
         tokenizer, model, torch = MagicMock(), MagicMock(), MagicMock()
         torch.inference_mode.side_effect = nullcontext
         tokenizer.return_value["input_ids"].shape = (1, 30)
@@ -49,6 +153,41 @@ class ContextGraphTests(unittest.TestCase):
         self.assertEqual(fact["predicate_start"], 54)
         self.assertEqual(fact["arguments"]["object"]["text"], "Bari")
         self.assertEqual(model.generate.call_count, 2)
+        self.assertEqual(model.generate.call_args_list[0].kwargs["max_new_tokens"], 384)
+        self.assertEqual(model.generate.call_args_list[1].kwargs["max_new_tokens"], 1)
+
+    def test_compact_fact_uses_exact_indexed_occurrence_and_original_clause_for_evidence(self):
+        text = "Ada parte. Ada incontra Ada a Bari."
+        base = 50
+        mentions = [{"text": "Ada", "label": "PERSON", "start": base+i, "end": base+i+3} for i in (0, 11, 24)]
+        passage = {"text": text, "start": base, "core_start": base+11, "core_end": base+len(text),
+                   "context_mentions": mentions}
+        args = {"subject": 2, "object": 3, "place": ["Bari", "LOCATION"]}
+        row = [2, "meeting", "incontra", "asserted", args]
+        def parse(rows):
+            raw = json.dumps({"relations": [], "facts": rows})
+            return _parse_proposals(raw, passage, compact=True)
+        accepted, = parse([row, row])["facts"]
+        self.assertEqual(accepted["arguments"]["object"]["start"], base+24)
+        self.assertEqual(accepted["arguments"]["place"]["source"], "qwen")
+        self.assertEqual(text[accepted["start"]-base:accepted["end"]-base], "Ada incontra Ada a Bari")
+        for wrong in (1, 0, 42, False, ["Ada", "PERSON"], ["Parma", "LOCATION"]):
+            with self.subTest(ref=wrong):
+                self.assertTrue(parse([[*row[:4], {**args, "object": wrong}]])["errors"])
+        passage["core_end"] = base+12
+        self.assertTrue(parse([row])["errors"])
+
+    def test_compact_role_keeps_cue_direction_and_literal_missing_participant(self):
+        text = "Lea Blu, difensore di fiducia di A.A., conosce Ada Neri."
+        passage = {"text": text, "start": 20, "core_start": 20, "core_end": 20+len(text),
+                   "context_mentions": [{"text": "Lea Blu", "start": 20, "end": 27, "label": "PERSON"}]}
+        missing = ["A.A.", "PERSON"]
+        raw = json.dumps({"relations": [[1, 1, missing], [1, missing, 1], [0, 1, missing]], "facts": []})
+        parsed = parse_context_review(json.dumps({"compact_response": raw, "checks": []}), passage)
+        relation, = parsed["relations"]
+        self.assertEqual(parsed["status"], "partial")
+        self.assertEqual(relation["target"]["start"], 20 + text.index("A.A."))
+        self.assertEqual(relation["predicate_start"], 20 + text.index("difensore"))
 
     def test_new_proposals_add_unlisted_relations_and_events_with_quoted_participants(self):
         cases = [

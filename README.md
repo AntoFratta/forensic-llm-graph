@@ -15,7 +15,7 @@ This project helps readers reconstruct the context of Italian forensic and legal
 
 1. **Extract entities.** Rules and Italian spaCy process every document. The ten labels are `PERSON`, `COMPANY`, `ROLE`, `LOCATION`, `EMAIL`, `PHONE`, `TAX_CODE`, `VAT_NUMBER`, `BANK_ACCOUNT` and `TIME`. Banking mentions include IBANs and other account numbers.
 2. **Select and review NER passages.** Minerva measures how surprising each passage is to the model using perplexity. Passages have cores of about 800 characters and normally up to 160 characters of context on either side. Context is extended when needed to keep a first-pass candidate intact. Selection combines perplexity with signals such as overlapping candidates and possible omissions. The review budget is 20% of passages, rounded up and capped at 100. Qwen reviews the highest-priority eligible passages within that budget. The pipeline checks proposed labels and spans against the text before merging them with the first pass.
-3. **Build the relation graph.** The pipeline applies text-grounded rules to all documents and sends up to 100 selected passages to Qwen by default. Selection covers available contextual relation and event families, then rotates through the sources. Qwen reads each selected passage and proposes contextual relations and events directly, quoting the predicate and its arguments and indicating whether the text asserts, reports, hypothesizes or negates the fact. The validator checks types, roles and original offsets. A second Qwen check assesses each grounded proposal against the passage. Role, employment and representation proposals use numbered predicate cues and endpoint validation. [Relation review](src/relation_review.py) · [Contextual facts](src/context_facts.py)
+3. **Build the relation graph.** Rules process the entire corpus. By default, Qwen reviews up to 100 selected passages, covering several sources and families of relations and events. Within each passage, Qwen first confirms, rejects or corrects rule candidates in their source clauses. The pipeline validates the decisions and checkpoints their verification results before asking separately for additional facts and role relations in the selected clauses. Qwen can quote participants missed by NER. An interrupted review resumes from the saved decisions. If the passage has no candidates or role cues, it can propose facts in any clause overlapping the selected core. The validator recovers the original spans and checks types and roles. A second Qwen call checks each grounded contextual fact against the text. Role, employment and representation proposals use numbered predicate cues and endpoint validation. [Relation review](src/relation_review.py) · [Guided questions](src/guided_review.py)
 
 The graph creates a subgraph for every input document. `MENTIONED_IN` links a subject to the document where it appears. `CO_OCCURS_WITH` records that two subjects appear in the same passage. `EXPLICIT_RELATION` represents appointments, employment and legal representation. `CONTEXT_RELATION` covers directed links such as a person to their place of residence or an account holder to a bank account. A `FACT` node represents an event or a statement and connects the participants to their roles, with place, time or speaker when the text supports them. Evidence records the character offsets of the source text and, for contextual claims, whether the text states, attributes, hypothesises or negates them. [Graph construction](src/relation_graph.py)
 
@@ -172,11 +172,27 @@ Generate the raw spaCy predictions on the test documents with `run_pipeline.py -
 
 **Full-corpus NER, run `05`.** Minerva scored 28,907 passages. Qwen returned 81 fully usable responses, 18 partially usable responses and one unusable response across 100 passages. The hybrid pass changed predictions in 29 documents.
 
-**NER review on selected passages.** A separate diagnostic sample of 12 passages from DICE and ArchivioAntimafia was drawn from those selected for Qwen in the full-corpus run. On that sample, micro F1 rose from 29.03% before review to 40.00% after review.
+**NER review on selected passages.** A separate diagnostic comparison covers 30 of the 100 passages selected for Qwen in the full-corpus run. The sample contains 20 passages from 20 DICE articles and 10 non-overlapping passages from four ArchivioAntimafia documents. Across 172 annotated mentions, exact matches rose from 66 to 83 and false positives fell from 103 to 76 after review. Micro F1 rose from 38.71% to 50.15% on these 30 passages.
 
 ### Final relation graph
 
-The graph test uses the saved full-corpus NER predictions and the fixed selection of 100 passages. Rules process every document. The comparison measures which edges and event nodes the validated Qwen proposals add, and evaluates the extracted facts against the reference. Results for the direct-proposal run are pending.
+Both graphs use the same NER predictions for 10,654 documents. Qwen reviewed 100 passages from 69 documents in 14 min 40 s of review time, excluding model loading. The pipeline accepted 65 proposals across 39 passages. Of these, 37 confirmed facts already in the rules graph and 28 added a contextual relation or event. All accepted proposals came from the candidate-review phase, including one correction to the participants.
+
+| Full-corpus graph | Rules | Rules + Qwen |
+|---|---:|---:|
+| Contextual relation edges | 408 | 427 |
+| Event nodes | 632 | 641 |
+| Explicit role, employment and representation edges | 106 | 106 |
+| Candidate document pairs | 304 | 304 |
+
+The diagnostic sample contains 15 passages, three per source, drawn from the reviewed passages and disjoint from the six pilot documents. The source-text reference contains 85 contextual facts and events and 10 role relations. Exact matching requires the annotated predicate and participant spans, labels, roles and, for contextual facts, assertion status.
+
+| Contextual facts and events on 15 passages | Exact matches | Precision | Recall | Micro F1 |
+|---|---:|---:|---:|---:|
+| Rules | 8 of 85 | 72.73% | 9.41% | 16.67% |
+| Rules + Qwen | 8 of 85 | 57.14% | 9.41% | 16.16% |
+
+The three additional predictions on these passages identify the resident and street address but omit the postal code and municipality from the annotated address. Both graphs also predicted one of the ten role relations with a different source span: the prediction included the lawyer’s title. Neither achieved an exact role match. These figures describe a small, selectively reviewed sample with a model-annotated reference.
 
 The local research workspace holds the experiment inputs and outputs. A CPU rebuild uses the original NER file, the matching saved relation reviews, the graph configuration and the corresponding extraction code.
 

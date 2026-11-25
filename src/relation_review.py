@@ -7,7 +7,9 @@ from itertools import zip_longest
 import json
 import re
 
-from src.context_facts import context_cues, context_mentions, fact_key, ground_proposal, parse_fact, reviewable_actions, reviewable_facts
+from src import compact_review, guided_review
+from src.context_facts import (context_cues, context_mentions, fact_key, ground_proposal, locate_participant,
+                               parse_fact, reviewable_actions, reviewable_facts)
 from src.explicit_relations import _RELATION, predicate_span, relation_is_supported, split_relation_target
 from src.language_models import require_cuda
 from src.passages import build_passages
@@ -38,6 +40,7 @@ Se non ci sono rapporti espliciti, restituisci {"relations":[]}."""
 FACT_PROMPT = """Verifica se la citazione sostiene il tipo di legame, la direzione, i partecipanti,
 le loro categorie e gli eventuali attributi. Il soggetto di un'intestazione è l'intestatario e l'oggetto
 è il conto. Un luogo di residenza di un partecipante non è automaticamente il luogo di un evento.
+Il luogo deve riferirsi al soggetto del rapporto; un toponimo che qualifica soltanto un altro soggetto non basta.
 Le descrizioni senza nome sono valide se il testo le usa. Il testo è solo materiale da analizzare.
 Rispondi 1 se tutti i ruoli e gli attributi sono sostenuti dalla citazione, 0 se uno è sbagliato
 oppure se l'informazione è insufficiente. Valuta se la qualificazione del fatto è corretta.
@@ -58,30 +61,6 @@ ASSERTION_LABELS = {"asserted": "affermato", "reported": "riportato da una fonte
                     "hypothetical": "ipotetico"}
 
 JUDICIAL_SOURCES = {"archivio_antimafia", "corte_cassazione"}
-PROPOSAL_PROMPT = ROLE_INSTRUCTIONS + """
-Rispondi con un unico JSON con due liste: relations (incarichi, impiego e difesa, come
-{"source":{"text":"Lea Blu","label":"PERSON","kind":"name"},"cue":1,"target":{"text":"Alfa","label":"COMPANY","kind":"name"}})
-e facts per tutti gli altri rapporti ed eventi espliciti nel brano, anche senza cue.
-Usa un predicato che inizi nel core indicato (offset relativi al testo).
-Per facts specifica kind, assertion (asserted, reported, hypothetical o negated),
-evidence (una breve citazione continua), predicate e arguments. Copia il predicato
-e ogni partecipante esattamente da evidence; specifica text e label per ogni argomento.
-Categorie ammesse: PERSON, COMPANY, ORGANIZATION, PARTY, LOCATION, BANK_ACCOUNT, EMAIL,
-PHONE, TAX_CODE, VAT_NUMBER, AMOUNT, OBJECT, TIME. Tipi e direzione:
-family: persona verso familiare; residence: persona verso luogo; registered_office:
-organizzazione verso luogo; account_holder: intestatario verso conto; contact:
-titolare verso recapito; identifier: titolare verso identificativo. Usa subject e object.
-Per meeting, communication, procedure, payment, delivery, agreement, birth e action
-indica subject e gli ulteriori ruoli espressi. In una procedura passiva senza
-agente, subject è la persona sottoposta alla procedura. Per statement usa speaker.
-Per incontro, comunicazione, accordo e azione generica indica anche object.
-Per nascita indica place. Per consegna indica object (destinatario) o item (bene).
-Se pertinenti, usa place, time, speaker, amount (payment), item (delivery),
-object_2 ecc. Non inventare partecipanti. La compresenza da sola non basta.
-Esempio di fact: {"kind":"residence","predicate":"dimora a","evidence":"Lea Blu dimora a Roma",
-"assertion":"asserted","arguments":{"subject":{"text":"Lea Blu","label":"PERSON"},
-"object":{"text":"Roma","label":"LOCATION"}}}. Se non trovi nulla: {"relations":[],"facts":[]}.
-"""
 _TYPOGRAPHY = str.maketrans({"’": "'", "‘": "'", "“": '"', "”": '"',
                             "ﬁ": "fi", "ﬂ": "fl", "ﬀ": "ff", "ﬃ": "ffi", "ﬄ": "ffl"})
 
@@ -261,11 +240,11 @@ def _locate(quote: str, text: str) -> tuple[int, int]:
     return positions[start], positions[end]
 
 
-def _endpoint(item: dict, evidence: str, offset: int, known_names: list) -> dict:
+def _endpoint(item: dict, evidence: str, offset: int, known_names: list, span=None) -> dict:
     if (not isinstance(item, dict) or item.get("label") not in SUBJECT_LABELS
             or item.get("kind") not in ("name", "description")):
         raise ValueError("Endpoint requires a PERSON or COMPANY label and a mention kind.")
-    start, end = _locate(item.get("text"), evidence)
+    start, end = locate_participant(item.get("text"), evidence, offset, span, _locate)
     span = {"start": offset + start, "end": offset + end, "label": item["label"]}
     value = evidence[start:end]
     if item["kind"] == "name" and not any(character.isupper() for character in value) and span not in known_names:
@@ -334,15 +313,24 @@ def parse_relation_review(response: str, passage: dict, *, context: bool = False
     except ValueError as exc:
         return {"status": "invalid_response", "relations": [], "errors": [str(exc)]}
 
+    return _parse_role_items(payload["relations"], passage)
+
+
+def _parse_role_items(items, passage, *, compact=False):
     relations, errors, seen = [], [], set()
     matches = {predicate_span(match): match for match in _cue_matches(passage)}
     cues = list(matches)
-    for item in payload["relations"]:
+    text = passage["text"]
+    parts = compact_review.clauses(text) if compact else []
+    for item in items:
         try:
-            if not isinstance(item, dict):
+            source_span = target_span = None
+            if compact:
+                item, (start, end), positions, source_span, target_span = compact_review.expand_role(
+                    item, passage, parts, cues)
+            elif not isinstance(item, dict):
                 raise ValueError("Each relation must be an object.")
-            text = passage["text"]
-            if "evidence" in item:
+            elif "evidence" in item:
                 start, end = _locate(item["evidence"], text)
                 positions = _predicate(item, text, start, end, cues)
             else:
@@ -353,8 +341,8 @@ def parse_relation_review(response: str, passage: dict, *, context: bool = False
             evidence = text[start:end]
             offset = passage["start"] + start
             known_names = passage.get("known_names", [])
-            source = _endpoint(item.get("source"), evidence, offset, known_names)
-            target = _endpoint(item.get("target"), evidence, offset, known_names)
+            source = _endpoint(item.get("source"), evidence, offset, known_names, source_span)
+            target = _endpoint(item.get("target"), evidence, offset, known_names, target_span)
             left, right = (passage["start"] + position for position in positions)
             if source["start"] < target["end"] and target["start"] < source["end"]:
                 raise ValueError("Relation endpoints must be distinct text spans.")
@@ -387,8 +375,21 @@ def parse_context_review(response: str, passage: dict, *, allow_positional: bool
     """Validate each proposed fact independently and retain supported proposals."""
     try:
         payload = _decode_review(response, allow_trailing_punctuation=True)
-        if isinstance(payload, dict) and set(payload) == {"proposal_response", "checks"}:
-            parsed = _parse_proposals(payload["proposal_response"], passage)
+        if isinstance(payload, dict) and set(payload) in (
+                {"decision_responses", "addition_responses", "checks"}, {"guided_responses", "checks"},
+                {"proposal_response", "checks"}, {"compact_response", "checks"}):
+            if "decision_responses" in payload:
+                questions = guided_review.questions(passage, _passage_cues)
+                first = _guided_proposals(questions, payload["decision_responses"], phase="decisions")
+                extra = _guided_proposals(questions, payload["addition_responses"], phase="additions")
+                parsed = {"relations": extra["relations"], "errors": first["errors"] + extra["errors"],
+                          "facts": first["facts"] + _new_facts(extra["facts"], first["facts"])}
+            elif "guided_responses" in payload:
+                parsed = _guided_proposals(guided_review.questions(passage, _passage_cues), payload["guided_responses"])
+            else:
+                compact = "compact_response" in payload
+                parsed = _parse_proposals(payload["compact_response" if compact else "proposal_response"],
+                                          passage, compact=compact)
             checks = payload["checks"]
             if not isinstance(checks, list) or len(checks) != len(parsed["facts"]):
                 raise ValueError("A verification is required for each grounded proposal.")
@@ -488,7 +489,7 @@ def _proposal_result(parsed: dict) -> dict:
     return parsed
 
 
-def _parse_proposals(raw: str, passage: dict) -> dict:
+def _parse_proposals(raw: str, passage: dict, *, compact: bool = False) -> dict:
     parsed = {"relations": [], "facts": [], "errors": []}
     try:
         payload = _decode_review(raw)
@@ -498,12 +499,14 @@ def _parse_proposals(raw: str, passage: dict) -> dict:
     except ValueError as exc:
         parsed["errors"].append(str(exc))
         return parsed
-    roles = parse_relation_review(json.dumps({"relations": payload["relations"]}), passage)
+    roles = _parse_role_items(payload["relations"], passage, compact=compact)
     parsed.update(relations=roles["relations"], errors=roles["errors"])
+    parts = compact_review.clauses(passage["text"]) if compact else []
     seen = set()
     for item in payload["facts"]:
         try:
-            fact = ground_proposal(item, passage, _locate)
+            fact = (compact_review.ground_fact(item, passage, parts, _locate) if compact
+                    else ground_proposal(item, passage, _locate))
             key = fact_key(fact), fact["assertion"]
             if key not in seen:
                 parsed["facts"].append(fact)
@@ -547,57 +550,144 @@ def _fact_responses(candidates: list, passage: dict, settings: dict, model, toke
     return responses
 
 
-def review_relations(passage: dict, settings: dict, model, tokenizer) -> dict:
-    """Generate a review, retry invalid output once when configured."""
-    torch = require_cuda()
-    attempts = []
-    text = passage["text"]
-    request = {"text": text, "cues": [
-        {"number": number, "text": text[start:end], "context": text[max(0, start - 30):end + 30]}
-        for number, (start, end) in enumerate(_passage_cues(passage), 1)
-    ]}
-    context = "context_mentions" in passage
-    if context:
-        request["core"] = [passage["core_start"] - passage["start"], passage["core_end"] - passage["start"]]
-    max_new_tokens = settings["max_new_tokens"]
-    for _ in range(settings.get("validation_retries", 1) + 1):
-        messages = [{"role": "system", "content": PROPOSAL_PROMPT if context else SYSTEM_PROMPT},
-                    {"role": "user", "content": json.dumps(request, ensure_ascii=False)}]
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False,
-                                              add_generation_prompt=True, enable_thinking=False)
-        inputs = tokenizer(prompt, add_special_tokens=False, return_tensors="pt")
-        length = inputs["input_ids"].shape[1]
-        if length > settings["max_input_tokens"]:
-            attempts.append({"status": "token_limit", "raw_response": None})
-            break
-        with torch.inference_mode():
-            output = model.generate(**inputs.to(model.device), do_sample=False,
-                                    max_new_tokens=max_new_tokens,
-                                    temperature=None, top_p=None, top_k=None,
-                                    pad_token_id=tokenizer.pad_token_id, use_cache=True)
-        tokens = output[0, length:]
-        response = tokenizer.decode(tokens, skip_special_tokens=True)
-        eos = model.generation_config.eos_token_id
-        eos_ids = eos if isinstance(eos, list) else [eos]
-        if len(tokens) >= max_new_tokens and int(tokens[-1]) not in eos_ids:
-            attempts.append({"status": "truncated", "raw_response": response})
-            request["validation_errors"] = ["Return complete JSON with short evidence quotations."]
-            continue
-        if context:
-            proposals = _parse_proposals(response, passage)
-            checks = _fact_responses(proposals["facts"], passage, settings, model, tokenizer, torch)
-            response = json.dumps({"proposal_response": response, "checks": checks}, ensure_ascii=False)
-            parsed = parse_context_review(response, passage)
+def _generate_reply(instruction, request, max_new_tokens, settings, model, tokenizer, torch):
+    messages = [{"role": "system", "content": instruction},
+                {"role": "user", "content": json.dumps(request, ensure_ascii=False, separators=(",", ":"))}]
+    prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+    inputs = tokenizer(prompt, add_special_tokens=False, return_tensors="pt")
+    length = inputs["input_ids"].shape[1]
+    if length > settings["max_input_tokens"]:
+        return {"status": "token_limit", "raw_response": None}
+    with torch.inference_mode():
+        output = model.generate(**inputs.to(model.device), do_sample=False, max_new_tokens=max_new_tokens,
+                                temperature=None, top_p=None, top_k=None,
+                                pad_token_id=tokenizer.pad_token_id, use_cache=True)
+    tokens = output[0, length:]
+    eos = model.generation_config.eos_token_id
+    eos_ids = eos if isinstance(eos, list) else [eos]
+    truncated = len(tokens) >= max_new_tokens and int(tokens[-1]) not in eos_ids
+    return {"status": "truncated" if truncated else "complete",
+            "raw_response": tokenizer.decode(tokens, skip_special_tokens=True)}
+
+
+def _guided_answer(raw, question, *, phase=None):
+    try:
+        if phase == "decisions":
+            # The candidate list is independent of anything the model writes after its closing bracket.
+            prefix = re.match(r'^\s*(?:```(?:json)?\s*)?(?:\{\s*"decisions"\s*:\s*)?(?=\[)', raw or "")
+            if prefix is None:
+                raise ValueError("Return a JSON decisions array.")
+            decisions, _ = json.JSONDecoder().raw_decode(raw, prefix.end())
+            payload = {"decisions": decisions}
         else:
-            parsed = parse_relation_review(response, passage)
-        result = {"status": parsed["status"], "raw_response": response,
-                  "accepted_count": len(parsed["relations"]) + len(parsed.get("facts", [])), "errors": parsed["errors"]}
+            payload = _decode_review(raw)
+        if phase == "additions":
+            if not isinstance(payload, dict) or not payload or not payload.keys() <= {"facts", "relations"}:
+                raise ValueError("Return only facts and/or relations arrays.")
+            local, request, _, key = question
+            question = (local, {**request, "candidati": []}, [], key)
+            payload = {**payload, "decisions": []}
+        return _proposal_result(guided_review.parse_answer(payload, question, _locate, _parse_role_items))
+    except (TypeError, ValueError) as exc:
+        return {"status": "invalid_response", "errors": [str(exc)], "relations": [], "facts": []}
+
+
+def _guided_proposals(questions, rows, *, phase=None):
+    if phase == "decisions":
+        questions = [q for q in questions if q[1]["candidati"]]
+    if not isinstance(rows, list) or len(rows) != len(questions):
+        raise ValueError("Expected one answer for each review question.")
+    merged = {"relations": [], "facts": [], "errors": []}
+    seen = set()
+    for question, row in zip(questions, rows, strict=True):
+        if not isinstance(row, dict) or row.get("question_sha256") != question[3]:
+            raise ValueError("The answer must match the original clause, candidates and mention indexes.")
+        if row.get("status") in ("truncated", "token_limit"):
+            merged["errors"].append(row["status"])
+            continue
+        parsed = _guided_answer(row.get("raw_response"), question, phase=phase)
+        merged["errors"].extend(parsed["errors"])
+        merged["relations"].extend(parsed["relations"])
+        for fact in parsed["facts"]:
+            key = fact_key(fact), fact["assertion"]
+            if key not in seen:
+                merged["facts"].append(fact)
+                seen.add(key)
+    return merged
+
+
+def _review_question(instruction, request, parse, budget, settings, model, tokenizer, torch, *, keep_partial,
+                     allow_complete_list=False):
+    attempts = []
+    for _ in range(settings.get("validation_retries", 1) + 1):
+        result = _generate_reply(instruction, request, budget, settings, model, tokenizer, torch)
+        if result["status"] == "complete" or (allow_complete_list and result["status"] == "truncated"):
+            parsed = parse(result["raw_response"])
+            if result["status"] == "complete" or parsed["status"] in ("ok", "partial"):
+                result.update(generation_status=result["status"], status=parsed["status"], errors=parsed["errors"],
+                              accepted_count=len(parsed["relations"]) + len(parsed.get("facts", [])))
         attempts.append(result)
-        if result["status"] == "ok" or (context and result["status"] == "partial"):
+        if result["status"] in ("ok", "token_limit") or (keep_partial and result["status"] == "partial"):
             break
-        request["validation_errors"] = result["errors"][:5]
+        errors = result.get("errors", ["Risposta troppo lunga. Restituisci meno proposte, complete."])
+        request = {**request, "validation_errors": errors[:3]}
     selected = next((a for a in reversed(attempts) if a["status"] in ("ok", "partial")), attempts[-1])
     return {**selected, "attempts": attempts}
+
+
+def _new_facts(proposed, already_checked):
+    seen = {(fact_key(f), f["assertion"]) for f in already_checked}
+    return [f for f in proposed if (fact_key(f), f["assertion"]) not in seen]
+
+
+def _run_phase(questions, phase, budget, settings, model, tokenizer, torch):
+    rows = []
+    decisions = phase == "decisions"
+    prompt = guided_review.DECISION_PROMPT if decisions else guided_review.ADDITION_PROMPT
+    for question in questions:
+        request = question[1]
+        if decisions and not request["candidati"]:
+            continue
+        parse = partial(_guided_answer, question=question, phase=phase)
+        result = _review_question(prompt + guided_review.TYPE_INSTRUCTIONS, request, parse, budget, settings,
+                                  model, tokenizer, torch, keep_partial=True, allow_complete_list=decisions)
+        rows.append({**result, "question_sha256": question[3]})
+    return rows
+
+
+def review_relations(passage: dict, settings: dict, model, tokenizer, *, decision_checkpoint=None,
+                     save_decisions=None) -> dict:
+    torch = require_cuda()
+    if "context_mentions" not in passage:
+        text = passage["text"]
+        request = {"text": text, "cues": [
+            {"number": number, "text": text[start:end], "context": text[max(0, start - 30):end + 30]}
+            for number, (start, end) in enumerate(_passage_cues(passage), 1)
+        ]}
+        return _review_question(SYSTEM_PROMPT, request, partial(parse_relation_review, passage=passage),
+                                settings["max_new_tokens"], settings, model, tokenizer, torch, keep_partial=False)
+    questions = guided_review.questions(passage, _passage_cues)
+    budget = min(settings["max_new_tokens"], 384)
+    rows = (decision_checkpoint["decision_responses"] if decision_checkpoint is not None else
+            _run_phase(questions, "decisions", budget, settings, model, tokenizer, torch))
+    first = _guided_proposals(questions, rows, phase="decisions")
+    if decision_checkpoint is None:
+        checks = _fact_responses(first["facts"], passage, settings, model, tokenizer, torch)
+        if save_decisions is not None:
+            save_decisions({"decision_responses": rows, "checks": checks})
+    else:
+        checks = decision_checkpoint["checks"]
+        if [c["reference"] for c in checks] != [_fact_reference(f) for f in first["facts"]]:
+            raise ValueError("Saved decisions refer to different candidates.")
+    extras = _run_phase(questions, "additions", budget, settings, model, tokenizer, torch)
+    proposed = _guided_proposals(questions, extras, phase="additions")
+    new_checks = _fact_responses(_new_facts(proposed["facts"], first["facts"]), passage, settings, model, tokenizer, torch)
+    response = json.dumps({"decision_responses": rows, "addition_responses": extras,
+                           "checks": checks + new_checks}, ensure_ascii=False)
+    parsed = parse_context_review(response, passage)
+    result = {"status": parsed["status"], "raw_response": response, "errors": parsed["errors"],
+              "accepted_count": len(parsed["relations"]) + len(parsed["facts"])}
+    return {**result, "attempts": [result]}
 
 
 def _revalidate_attempts(row: dict, passage: dict, parse) -> dict:
